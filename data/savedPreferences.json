@@ -1,0 +1,8 @@
+{
+  "overlayRestrictedContent": true,
+  "blockSettingsSwitch": true,
+  "appUninstallationProtection": true,
+  "enforceSafeSearch": true,
+  "enableProtectiveDNS": false,
+  "delayTimeout": 180000
+}

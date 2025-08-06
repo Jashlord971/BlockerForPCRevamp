@@ -1,0 +1,19 @@
+{
+  "blockedApps": [
+    {
+      "displayName": "Spyder",
+      "processName": "uninstall.exe",
+      "iconPath": "C:\\Program Files\\Spyder\\spyder.ico",
+      "installationPath": "C:\\Program Files\\Spyder"
+    },
+    {
+      "displayName": "Microsoft Edge",
+      "processName": "msedge.exe",
+      "iconPath": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\138.0.3351.121\\msedge.exe,0",
+      "installationPath": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application"
+    }
+  ],
+  "blockedWebsites": [
+    "realmadrid.com"
+  ]
+}

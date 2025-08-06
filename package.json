@@ -1,0 +1,39 @@
+{
+  "name": "eagleblockerforpc",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "parcel build src/index.html --dist-dir dist && tsc src/electron.ts --outDir dist",
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "main": "src/main.js",
+  "build": {
+    "files": [
+      "dist/**/*"
+    ]
+  },
+  "type": "commonjs",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "get-installed-apps": "^1.1.1",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "sudo-prompt": "^9.2.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.9",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "concurrently": "^9.2.0",
+    "electron": "^37.2.5",
+    "electron-builder": "^26.0.12",
+    "parcel": "^2.15.4",
+    "typescript": "^5.9.2",
+    "vite": "^6.3.5",
+    "wait-on": "^8.0.4"
+  },
+  "description": ""
+}

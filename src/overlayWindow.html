@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<style>
+  .spinner {
+    margin: 10px auto;
+    width: 40px;
+    height: 40px;
+    border: 5px solid rgba(255, 255, 255, 0.2);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+</style>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Overlay</title>
+</head>
+<body style="background: rgba(0,0,0,0.5); color: white; text-align: center; padding-top: 200px;">
+<h1>EagleBlocker Overlay</h1>
+<p>We have noticed that a restricted application called '<span id="appName">the application</span>' has been opened. Please click close to close both the overlay window and the given app</p>
+<button id="closeBtn">Close App and Overlay</button>
+<script src="render.js"></script>
+
+<div id="loading" style="display: none; margin-top: 20px;">
+  <p>Closing app, please wait...</p>
+  <div class="spinner"></div>
+</div>
+
+</body>
+</html>
