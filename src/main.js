@@ -1,23 +1,64 @@
 const {app, BrowserWindow, Menu, ipcMain, dialog}  = require('electron');
-const {getPreference}  = require("./store.js");
 const path = require("path");
-const {exec} = require("child_process");
-const {getInstalledAppInfo} = require("./installedApps");
-const {enforceSafeSearch, isSafeSearchEnforced} = require("./safeSearchEnforcer");
-const {startCountdownTimer, timerEvents, reactivateTimers} = require("./timeHandler");
+const {exec, spawn} = require("child_process");
+const {Service} = require("node-windows");
+
+// Determine if we're in development or production
+const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+
+// Helper function to get the correct file path
+function getAssetPath(fileName) {
+    if (isDev) {
+        return path.join(__dirname, fileName);
+    } else {
+        // In production, files are in the same directory as main.js
+        return path.join(__dirname, fileName);
+    }
+}
+
+// Helper function to get HTML file path
+function getHtmlPath(fileName) {
+    console.log(__dirname);
+    return path.join(__dirname, fileName);
+}
+
+// Helper function to get data directory path
+function getDataPath() {
+    if (isDev) {
+        return path.join(__dirname, '..', 'data');
+    } else {
+        // In production, check if data is in resources/app or in extraResources
+        const appPath = path.dirname(__dirname);
+        const extraResourcesPath = path.join(appPath, '..', 'data');
+        const appDataPath = path.join(__dirname, 'data');
+
+        // Check which path exists
+        const fs = require('fs');
+        if (fs.existsSync(extraResourcesPath)) {
+            return extraResourcesPath;
+        } else if (fs.existsSync(appDataPath)) {
+            return appDataPath;
+        } else {
+            // Fallback to user data directory
+            return path.join(app.getPath('userData'), 'data');
+        }
+    }
+}
+
+// Import modules with correct paths
+const {getPreference} = require(getAssetPath("store.js"));
+const {getInstalledAppInfo} = require(getAssetPath("installedApps.js"));
+const {enforceSafeSearch, isSafeSearchEnforced} = require(getAssetPath("safeSearchEnforcer.js"));
+const {startCountdownTimer, timerEvents, reactivateTimers} = require(getAssetPath("timeHandler.js"));
 const {getInstalledApps} = require("get-installed-apps");
-const {closeApp, appBlockProtection, settingsProtectionOn, blockProtectionEmitter} = require("./blockProtection");
-const {configureSafeDNS, getActiveInterfaceName, isSafeDNS, dnsSuccessfullySetEvent} = require("./dnsProtection");
-const {addWebsiteToHostsFile} = require("./blockDomain");
-const os = require("os");
-const {savePreference, checkSavedPreferences} = require("./store");
+const {closeApp, appBlockProtection, settingsProtectionOn, blockProtectionEmitter} = require(getAssetPath("blockProtection.js"));
+const {configureSafeDNS, getActiveInterfaceName, isSafeDNS, dnsSuccessfullySetEvent} = require(getAssetPath("dnsProtection.js"));
+const {addWebsiteToHostsFile} = require(getAssetPath("blockDomain.js"));
+const {savePreference, checkSavedPreferences} = require(getAssetPath("store.js"));
 
 let mainWindow = null;
 const activeTimers = new Map();
-
 let overlayWindow = null;
-const isSettingsProtectionOn = true;
-
 let dnsConfirmationModal = null;
 let delayAccountDialog = null;
 let flag = false;
@@ -35,7 +76,7 @@ function createWindow() {
 
     mainWindow.webContents.openDevTools();
 
-    mainWindow.loadFile('src/mainConfig.html').then(() => {
+    mainWindow.loadFile(getHtmlPath('mainConfig.html')).then(() => {
         const customMenu = Menu.buildFromTemplate(getMenuTemplate());
         Menu.setApplicationMenu(customMenu);
     });
@@ -102,7 +143,7 @@ function openBlockWindowForWebsites(){
     }
 
     mainWindow.webContents.openDevTools();
-    void mainWindow.loadFile('src/blockTableForWebsites.html');
+    void mainWindow.loadFile(getHtmlPath('blockTableForWebsites.html'));
 }
 
 async function openDelaySettingDialogBox() {
@@ -110,7 +151,7 @@ async function openDelaySettingDialogBox() {
     mainWindow.webPreferences = {
         ...mainWindow.webPreferences,
         nodeIntegration: false,
-        preload: 'src/preload.js'
+        preload: getAssetPath('preload.js')
     };
 
     mainWindow.webContents.once('did-finish-load', () => {
@@ -119,7 +160,7 @@ async function openDelaySettingDialogBox() {
         mainWindow.webContents.send('delayTimeout', delayStatus);
     });
 
-    await mainWindow.loadFile('src/delaySettingModal.html');
+    await mainWindow.loadFile(getHtmlPath('delaySettingModal.html'));
 }
 
 async function openBlockWindowForApps(){
@@ -129,7 +170,7 @@ async function openBlockWindowForApps(){
         preload: 'src/preload.js'
     }
 
-    await mainWindow.loadFile('src/blockTableForApps.html');
+    await mainWindow.loadFile(getHtmlPath('blockTableForApps.html'));
 }
 
 async function openMainConfig(){
@@ -138,7 +179,7 @@ async function openMainConfig(){
         ...mainWindow.webPreferences,
         nodeIntegration: true,
         contextIsolation: false,
-        preload: 'src/preload.js'
+        preload: getAssetPath('preload.js')
     };
 
     mainWindow.webContents.once('did-finish-load', () => {
@@ -147,7 +188,7 @@ async function openMainConfig(){
         mainWindow.webContents.send('delayTimeout', delayStatus);
     });
 
-    await mainWindow.loadFile('src/mainConfig.html').then(() => {
+    await mainWindow.loadFile(getHtmlPath('mainConfig.html')).then(() => {
         const customMenu = Menu.buildFromTemplate(getMenuTemplate());
         Menu.setApplicationMenu(customMenu);
     });
@@ -190,15 +231,11 @@ async function isDnsMadeSafe(){
     return isSafeDNS(interfaceName);
 }
 
-ipcMain.handle('check-dns-safety', async () => await isDnsMadeSafe());
-
-async function setDnsState(){
-    const isDNSSafe = await isDnsMadeSafe();
-    const id = "enableProtectiveDNS";
-    if(!isDNSSafe){
-        savePreference(id, false);
-    }
-}
+ipcMain.handle('check-dns-safety', async () => {
+    const value = await isDnsMadeSafe();
+    console.log("dnsSafety:", value);
+    return value;
+});
 
 function refreshMainConfig(){
     if(mainWindow && mainWindow.webContents){
@@ -206,31 +243,75 @@ function refreshMainConfig(){
     }
 }
 
-async function handleDnsToggle(){
-    const id = 'enableProtectiveDNS';
-    const value = checkSavedPreferences(id);
-    if(value){
-        const isDnsSafe = await isDnsMadeSafe();
-        if(!isDnsSafe){
-            savePreference(id, false);
-        }
-    }
+function installMyService() {
+    const electronAppPath = process.execPath;
+    const electronAppName = path.basename(electronAppPath, '.exe');
+
+    const svc = new Service({
+        name: 'ElectronAppMonitor',
+        description: 'Monitors the availability of your Electron application.',
+        script: path.join(__dirname, 'monitor-service.js'), // Point to this script itself
+        nodeOptions: [
+            '--harmony',
+            '--max_old_space_size=4096'
+        ]
+    });
+
+    svc.on('install', function() {
+        svc.start();
+        console.log('Service installed and started.');
+    });
+
+    svc.on('uninstall', function() {
+        console.log('Service uninstalled.');
+    });
+
+    svc.on('start', function() {
+        console.log('ElectronAppMonitor service started.');
+        setInterval(() => {
+            exec(`tasklist /FI "IMAGENAME eq ${electronAppName}"`, (error, stdout, stderr) => {
+                if (stdout.includes(electronAppName)) {
+                    console.log(`${electronAppName} is running.`);
+                } else {
+                    console.warn(`${electronAppName} is not running. Attempting to restart.`);
+                    exec(`start "" "${path.join(electronAppPath, electronAppName)}"`, (err) => {
+                        if (err) {
+                            console.error(`Failed to restart ${electronAppName}: ${err.message}`);
+                        } else {
+                            console.log(`${electronAppName} restarted.`);
+                        }
+                    });
+                }
+            });
+        }, 5000); // Check every 5 seconds
+    });
+
+    svc.install(); // Or svc.uninstall(); to remove
 }
 
+
 app.whenReady().then(async () => {
+    console.log("dirName:", __dirname);
     settingsProtectionOn();
     appBlockProtection();
     reactivateTimers();
 
+    if(!isSafeSearchEnforced()){
+        savePreference("enforceSafeSearch", false);
+    }
+
     createWindow();
 
-    setDnsState().then(async () => {
-        await handleDnsToggle();
-        if(!isSafeSearchEnforced()){
-            savePreference("enforceSafeSearch", false);
+    setTimeout(async () => {
+        const value = await isDnsMadeSafe();
+        console.log("dnsSafety1 after delay:", value);
+        if(!value){
+            savePreference("enableProtectiveDNS", false);
+            refreshMainConfig();
         }
-        refreshMainConfig();
-    });
+    }, 4000);
+
+    //installMyService();
 });
 
 const closeDNSConfirmationWindow = () => {
@@ -238,42 +319,6 @@ const closeDNSConfirmationWindow = () => {
         dnsConfirmationModal.close();
         dnsConfirmationModal = null;
     }
-}
-
-function isSettingsOpen(callback) {
-    exec('tasklist', (err, stdout) => {
-        if (err) {
-            console.error('Error executing tasklist:', err);
-            callback(false);
-            return;
-        }
-
-        const isOpen = stdout.toLowerCase().includes('control.exe');
-        callback(isOpen);
-    });
-}
-
-function monitorControlPanel() {
-    if (isSettingsProtectionOn && overlayWindow === null){
-        setInterval(() => {
-            isSettingsOpen((open) => {
-                if (open) {
-                    console.log("Detected Control Panel is open!");
-                    createOverlayWindow();
-                }
-            });
-        }, 2000);
-    }
-}
-
-function killSettingsApp() {
-    exec('taskkill /IM SystemSettings.exe /F', (err) => {
-        if (err) {
-            console.error("Failed to kill Settings:", err);
-        } else {
-            console.log("Settings app terminated.");
-        }
-    });
 }
 
 function killControlPanel() {
@@ -333,7 +378,7 @@ function showDNSConfirmationWindow() {
         }
     });
 
-    void dnsConfirmationModal.loadFile(path.join(__dirname, 'dnsConfirmationModal.html'));
+    void dnsConfirmationModal.loadFile(getHtmlPath('dnsConfirmationModal.html'));
     dnsConfirmationModal.once('ready-to-show', () => dnsConfirmationModal.show());
     dnsConfirmationModal.setMenu(null);
     dnsConfirmationModal.webContents.openDevTools();
@@ -355,7 +400,7 @@ function createOverlayWindow() {
         }
     });
 
-    void overlayWindow.loadFile('src/overlayWindow.html');
+    void overlayWindow.loadFile(getHtmlPath('overlayWindow.html'));
 
     overlayWindow.on('closed', () => {
         overlayWindow = null;
@@ -475,16 +520,14 @@ async function showDelayAccountabilityDialogOrProgressDialog(settingId) {
 
     const remainingTime = getDurationValue(settingId);
     if(remainingTime === null){
-        void delayAccountDialog.loadFile(path.join(__dirname, 'confirmModal.html'));
+        void delayAccountDialog.loadFile(getHtmlPath('confirmModal.html'));
     }
     else{
-        void delayAccountDialog.loadFile(path.join(__dirname, 'progressBarForDelayChanges.html'));
+        void delayAccountDialog.loadFile(getHtmlPath('progressBarForDelayChanges.html'));
     }
 
     delayAccountDialog.once('ready-to-show', () => {
         delayAccountDialog.show();
-
-        console.log("remainingTime:", remainingTime);
         delayAccountDialog.webContents.send('init-delay-modal', {
             id: settingId,
             durationSeconds: remainingTime

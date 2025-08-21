@@ -9,16 +9,17 @@ const setChecked = (id, value) => {
     }
 }
 
-const showDelayChangeOrAccountabilityPartnerPrompt= (id) => ipcRenderer.send('show-delay-accountability-dialog', id);
+const showDelayChangeOrAccountabilityPartnerPrompt = (id) => ipcRenderer.send('show-delay-accountability-dialog', id);
 
 const showDNSSelectionPrompt = () => ipcRenderer.send('show-dns-dialog');
 
-function reflectSavedChanges() {
+function updateUIState() {
     const switchIds = [
         'enableProtectiveDNS',
         'overlayRestrictedContent',
         'blockSettingsSwitch',
-        'appUninstallationProtection'
+        'appUninstallationProtection',
+        'enforceSafeSearch'
     ];
 
     switchIds.forEach(id => {
@@ -34,76 +35,69 @@ function initializeOverlaySettingSwitch() {
     const id = "overlayRestrictedContent";
     const overlaySettingsSwitch = document.getElementById(id);
 
-    if (overlaySettingsSwitch) {
-        overlaySettingsSwitch.addEventListener("change", function (e) {
-            const savedValue = checkSavedPreferences(id);
+    if (!overlaySettingsSwitch || overlaySettingsSwitch._hasListener) return;
+    overlaySettingsSwitch._hasListener = true;
 
-            if (savedValue === true) {
-                overlaySettingsSwitch.checked = true;
-                showDelayChangeOrAccountabilityPartnerPrompt(id);
-            } else {
-                savePreference(id, true);
-            }
-        });
-    }
+    overlaySettingsSwitch.addEventListener("change", function (e) {
+        const savedValue = checkSavedPreferences(id);
+
+        if (savedValue === true) {
+            overlaySettingsSwitch.checked = true;
+            showDelayChangeOrAccountabilityPartnerPrompt(id);
+        } else {
+            savePreference(id, true);
+        }
+    });
 }
 
 const checkDnsSafety = async () => await ipcRenderer.invoke('check-dns-safety');
 
-function initializeProtectiveDNS(){
+function initializeProtectiveDNS() {
     const id = "enableProtectiveDNS";
     const protectiveDNS = document.getElementById(id);
 
-    if(!protectiveDNS || protectiveDNS._hasListener){
-        return;
-    }
+    if (!protectiveDNS || protectiveDNS._hasListener) return;
     protectiveDNS._hasListener = true;
 
-    protectiveDNS.addEventListener("change", async() => {
+    protectiveDNS.addEventListener("change", async () => {
         const savedValue = checkSavedPreferences(id);
-
         const isDnsSafeAlready = await checkDnsSafety();
 
-        if(isDnsSafeAlready && !!!savedValue){
+        if (isDnsSafeAlready && !!!savedValue) {
             protectiveDNS.checked = true;
             savePreference(id, true);
-        }
-        else if(!!savedValue){
+        } else if (!!savedValue) {
             protectiveDNS.checked = true;
             showDelayChangeOrAccountabilityPartnerPrompt(id);
-        }
-        else{
+        } else {
             protectiveDNS.checked = false;
             showDNSSelectionPrompt();
         }
     });
 }
 
-function initializeGenericSwitch(id){
+function initializeGenericSwitch(id) {
     const settingsProtection = document.getElementById(id);
-    if(!settingsProtection){
-        return;
-    }
+    if (!settingsProtection || settingsProtection._hasListener) return;
+    settingsProtection._hasListener = true;
+
     settingsProtection.addEventListener("change", () => {
         const savedValue = checkSavedPreferences(id);
-        if(!!savedValue){
+        if (!!savedValue) {
             settingsProtection.checked = true;
             showDelayChangeOrAccountabilityPartnerPrompt(id);
-        }
-        else{
+        } else {
             savePreference(id, true);
         }
     });
 }
-
-ipcRenderer.on('turnOffSetting', (event, id) => setChecked(id, false));
 
 function initializeSafeSearchSwitch() {
     const id = "enforceSafeSearch";
     const safeSearchSwitch = document.getElementById(id);
 
     if (!safeSearchSwitch || safeSearchSwitch._hasListener) return;
-    safeSearchSwitch._hasListener = true; // Mark as initialized
+    safeSearchSwitch._hasListener = true;
 
     safeSearchSwitch.addEventListener("change", () => {
         const savedValue = checkSavedPreferences(id);
@@ -124,43 +118,61 @@ function initializeSafeSearchSwitch() {
     });
 }
 
-document.querySelectorAll('.info-icon').forEach(icon => {
-    icon.addEventListener('mouseenter', (e) => {
-        const existing = document.querySelector('.tooltip-box');
-        if (existing) existing.remove();
+function initializeTooltips() {
+    // Only initialize tooltips once
+    const tooltipsInitialized = document.body.dataset.tooltipsInitialized;
+    if (tooltipsInitialized) return;
+    document.body.dataset.tooltipsInitialized = 'true';
 
-        const tooltip = document.createElement('div');
-        tooltip.className = 'tooltip-box';
-        tooltip.innerText = icon.getAttribute('data-description');
-        document.body.appendChild(tooltip);
+    document.querySelectorAll('.info-icon').forEach(icon => {
+        icon.addEventListener('mouseenter', (e) => {
+            const existing = document.querySelector('.tooltip-box');
+            if (existing) existing.remove();
 
-        const rect = icon.getBoundingClientRect();
-        const tooltipWidth = 250;
-        const offset = 10;
-        tooltip.style.top = (rect.top + window.scrollY + 5) + 'px';
-        tooltip.style.left = (rect.left + window.scrollX - tooltipWidth - offset) + 'px';
-        tooltip.style.display = 'block';
+            const tooltip = document.createElement('div');
+            tooltip.className = 'tooltip-box';
+            tooltip.innerText = icon.getAttribute('data-description');
+            document.body.appendChild(tooltip);
 
-        icon._tooltip = tooltip;
+            const rect = icon.getBoundingClientRect();
+            const tooltipWidth = 250;
+            const offset = 10;
+            tooltip.style.top = (rect.top + window.scrollY + 5) + 'px';
+            tooltip.style.left = (rect.left + window.scrollX - tooltipWidth - offset) + 'px';
+            tooltip.style.display = 'block';
+
+            icon._tooltip = tooltip;
+        });
+
+        icon.addEventListener('mouseleave', () => {
+            if (icon._tooltip) {
+                icon._tooltip.remove();
+                icon._tooltip = null;
+            }
+        });
     });
+}
 
-    icon.addEventListener('mouseleave', () => {
-        if (icon._tooltip) {
-            icon._tooltip.remove();
-            icon._tooltip = null;
-        }
-    });
-});
-
-function init() {
-    reflectSavedChanges();
+// Initial setup - only run once on page load
+function initializeEventListeners() {
     initializeOverlaySettingSwitch();
     initializeProtectiveDNS();
     initializeGenericSwitch('blockSettingsSwitch');
     initializeGenericSwitch('appUninstallationProtection');
     initializeSafeSearchSwitch();
+    initializeTooltips();
 }
 
-ipcRenderer.on('refreshMainConfig', () => init());
+// Full initialization (event listeners + UI state)
+function init() {
+    initializeEventListeners();
+    updateUIState();
+}
+
+// Event listeners
+ipcRenderer.on('turnOffSetting', (event, id) => setChecked(id, false));
+
+// Use updateUIState instead of full init to avoid double initialization
+ipcRenderer.on('refreshMainConfig', () => updateUIState());
 
 window.addEventListener('DOMContentLoaded', () => init());
