@@ -1,5 +1,6 @@
 const {ipcRenderer} = require("electron");
-const {get, set} = require("./store");
+const {get, set, readData} = require("./store");
+const sudoPrompt = require("sudo-prompt");
 const key = 'blockedWebsites';
 
 function renderTable() {
@@ -16,7 +17,12 @@ function renderTable() {
         tbody.appendChild(row);
     }
     else{
+        const blockData = readData();
+        const allowedWebsitesForDeletions = blockData.allowedForUnblockWebsites ?? [];
+
         list.forEach((item, index) => {
+            const isAllowedToDelete = allowedWebsitesForDeletions.includes(item);
+
             const row = document.createElement('tr');
 
             const nameCell = document.createElement('td');
@@ -24,14 +30,24 @@ function renderTable() {
 
             const deleteCell = document.createElement('td');
             const deleteButton = document.createElement('button');
-            deleteButton.textContent = 'Delete';
+
+            const deleteButtonDetails = getButtonTextAndColour(isAllowedToDelete);
+            deleteButton.textContent = deleteButtonDetails.label;
             deleteButton.style.backgroundColor = '#FF5555';
-            deleteButton.style.color = '#fff';
+            deleteButton.style.color = deleteButtonDetails.color;
             deleteButton.style.border = 'none';
             deleteButton.style.padding = '5px 10px';
             deleteButton.style.borderRadius = '5px';
             deleteButton.style.cursor = 'pointer';
-            deleteButton.onclick = () => removeItem(index);
+            deleteButton.onclick = () => {
+                if(isAllowedToDelete){
+                    removeItem(index);
+                }
+                else{
+                    const settingId = "site-->" + item;
+                    ipcRenderer.send('prime-block-for-deletion', settingId);
+                }
+            }
             deleteCell.appendChild(deleteButton);
 
             row.appendChild(nameCell);
@@ -41,12 +57,32 @@ function renderTable() {
     }
 }
 
+ipcRenderer.on('listeningForRenderTableCall', () => renderTable());
+
+function getButtonTextAndColour(isAllowedToDelete){
+    if(isAllowedToDelete){
+        return {
+            label: "Delete",
+            color: '#fff'
+        }
+    }
+
+    return {
+        color: 'green',
+        label: "Prepare for Deletion"
+    }
+}
+
 window.removeItem = function(index) {
     const list = get(key, []);
     list.splice(index, 1);
     set(key, list);
     renderTable();
 };
+
+function closeModal(modal){
+    modal.style.display = 'none';
+}
 
 window.addEventListener('DOMContentLoaded', () => {
     const modal = document.getElementById('modal');
@@ -65,14 +101,14 @@ window.addEventListener('DOMContentLoaded', () => {
         input.focus();
     });
 
-    cancelBtn.addEventListener('click', () => modal.style.display = 'none');
+    cancelBtn.addEventListener('click', () => closeModal(modal));
 
     saveBtn.addEventListener('click', async () => {
         const value = input.value.trim();
         if (!value) return;
 
         try {
-            const success = await addToBlockListsForWebsites(value);
+            const success = await addToBlockListsForWebsites(modal, value);
             if (success) {
                 renderTable();
                 modal.style.display = 'none';
@@ -84,7 +120,7 @@ window.addEventListener('DOMContentLoaded', () => {
     });
 });
 
-async function addToBlockListsForWebsites(domain) {
+function addToBlockListsForWebsites(modal, domain) {
     const normalizeDomain = (input) => {
         try {
             if (!input.startsWith('http')) input = 'http://' + input;
@@ -102,11 +138,63 @@ async function addToBlockListsForWebsites(domain) {
         return false;
     }
 
-    return new Promise((resolve, reject) => {
-        ipcRenderer.send('addWebsiteToHostsFile', { domain: baseDomain });
-        ipcRenderer.once('websiteBlockedSuccess', () => resolve(true));
-        ipcRenderer.once('websiteBlockedError', (event, error) => reject(new Error(error)));
-    });
+    return blockDomain(domain)
+        .then(isBlocked => {
+            if (isBlocked) {
+                const blockedWebsites = get('blockedWebsites', []);
+                if (!blockedWebsites.includes(domain)) {
+                    blockedWebsites.push(domain);
+                    set('blockedWebsites', blockedWebsites);
+                }
+            }
+            renderTable();
+            closeModal(modal);
+        })
+        .catch(() => {
+            alert("Unable to block given website");
+        });
 }
 
+async function blockDomain(baseDomain) {
+    const HOSTS_FILE = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    if (!baseDomain) {
+        console.error(`❌ Invalid domain or URL: ${baseDomain}`);
+        return;
+    }
+
+    const domainsToBlock = [baseDomain];
+    if (!baseDomain.startsWith('www.')) {
+        domainsToBlock.push(`www.${baseDomain}`);
+    }
+
+    const lines = domainsToBlock.map(d => `127.0.0.1 ${d}`);
+
+    const script = `
+        const fs = require('fs');
+        const os = require('os');
+        const path = ${JSON.stringify(HOSTS_FILE)};
+        const lines = ${JSON.stringify(lines)};
+        let content = fs.readFileSync(path, 'utf8');
+        lines.forEach(line => {
+            if (!content.includes(line)) content += os.EOL + line;
+        });
+        fs.writeFileSync(path, content, 'utf8');
+        console.log("✅ Blocked: " + lines.join(', '));
+    `.trim().replace(/\n\s+/g, ' ');
+
+    console.log("script:" + script);
+
+    return new Promise((resolve) => {
+        const command = `node -e "${script.replace(/"/g, '\\"')}"`;
+        sudoPrompt.exec(command, { name: 'Website Blocker' }, (error, stdout, stderr) => {
+            if (error) {
+                console.error(`❌ Failed to block ${baseDomain}:`, error.message || stderr);
+                resolve(false);
+                return;
+            }
+            console.log(stdout.trim());
+            resolve(true);
+        });
+    });
+}
 

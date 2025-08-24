@@ -3,6 +3,6 @@
   "blockSettingsSwitch": true,
   "appUninstallationProtection": true,
   "enforceSafeSearch": true,
-  "enableProtectiveDNS": false,
+  "enableProtectiveDNS": true,
   "delayTimeout": 180000
 }

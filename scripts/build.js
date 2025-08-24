@@ -4,21 +4,17 @@ const { execSync } = require('child_process');
 
 console.log('🔨 Building Eagle Blocker for PC...\n');
 
-// Step 1: Build Vite project
 console.log('📦 Building Vite project...');
 execSync('vite build', { stdio: 'inherit' });
 
-// Step 2: Ensure dist directory exists
 if (!fs.existsSync('dist')) {
     fs.mkdirSync('dist', { recursive: true });
 }
 
-// Step 3: Copy main.js
 console.log('\n📋 Copying Electron files...');
 fs.copyFileSync('src/main.js', 'dist/main.js');
 console.log('✅ Copied main.js');
 
-// Step 4: Copy all other JavaScript files from src
 const jsFiles = fs.readdirSync('src').filter(file =>
     file.endsWith('.js') && file !== 'main.js'
 );
@@ -35,7 +31,6 @@ jsFiles.forEach(file => {
     }
 });
 
-// Step 5: Copy HTML files
 console.log('\n🌐 Copying HTML files...');
 const htmlFiles = fs.readdirSync('src').filter(file => file.endsWith('.html'));
 
@@ -51,7 +46,6 @@ htmlFiles.forEach(file => {
     }
 });
 
-// Step 6: Copy CSS files if any
 console.log('\n🎨 Copying CSS files...');
 const cssFiles = fs.readdirSync('src').filter(file => file.endsWith('.css'));
 
@@ -67,7 +61,6 @@ cssFiles.forEach(file => {
     }
 });
 
-// Step 7: Copy data directory
 if (fs.existsSync('data')) {
     console.log('\n📊 Copying data directory...');
     if (!fs.existsSync('dist/data')) {
@@ -85,7 +78,6 @@ if (fs.existsSync('data')) {
     });
 }
 
-// Step 8: Copy any additional asset files (images, icons, etc.)
 console.log('\n🖼️  Copying asset files...');
 const assetExtensions = ['.png', '.jpg', '.jpeg', '.ico', '.svg', '.gif'];
 const assetFiles = fs.readdirSync('src').filter(file =>

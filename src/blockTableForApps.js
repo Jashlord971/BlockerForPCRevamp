@@ -17,7 +17,7 @@ function renderTable() {
         const row = document.createElement('tr');
 
         const nameCell = document.createElement('td');
-        nameCell.textContent = typeof item === 'string' ? item : item.displayName;
+        nameCell.textContent = item.displayName;
 
         const deleteCell = document.createElement('td');
         const deleteButton = document.createElement('button');

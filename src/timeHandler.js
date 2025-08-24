@@ -1,13 +1,10 @@
-const {savePreference, getJson, saveToPath} = require("./store.js");
-const {ipcRenderer} = require("electron");
-const timerPath = "data/timers.json";
 const EventEmitter = require('events');
-
+const {readData, savePreference, writeData} = require("./store");
 
 const timerEvents = new EventEmitter();
 
 function reactivateTimers(activeTimers) {
-    const data = getJson(timerPath);
+    const data = readData();
 
     Object.keys(data).forEach(settingId => {
         const timer = data[settingId];
@@ -24,8 +21,23 @@ function reactivateTimers(activeTimers) {
 }
 
 function handleExpiration(settingId, targetTimeout){
+    const delimiter = '-->';
     if(settingId === "delayTimeout"){
         savePreference(settingId, targetTimeout);
+    }
+    else if(settingId.includes(delimiter)){
+        const splits = settingId.split(delimiter);
+        const key = splits[0];
+        const item = splits[1];
+
+        const keyInBlockData = (key === 'site') ? 'allowedForUnblockWebsites' : 'allowedForUnblockApps';
+        let blockData = readData();
+        if(!blockData.hasOwnProperty(keyInBlockData)){
+            blockData[keyInBlockData] = [];
+        }
+
+        blockData[keyInBlockData].push(item);
+        timerEvents.emit('renderTableCall');
     }
     else{
         savePreference(settingId, false);
@@ -38,31 +50,29 @@ function startCountdownTimer(activeTimers, settingId, remainingTime, targetTimeo
     const delayTimeout = 30000;
     const startTimeStamp = Date.now();
     const endTime = startTimeStamp + delayTimeout;
+    const mainData = readData();
 
     const intervalId = setInterval(() => {
         const now = Date.now();
         const remaining = Math.max(endTime - now, 0);
 
         console.log(settingId + ": " + remaining);
+        const data = mainData?.timerInfo ?? {};
 
         if (remaining <= 0) {
             clearInterval(intervalId);
             activeTimers.delete(settingId);
 
-            handleExpiration(settingId, targetTimeout);
+            void handleExpiration(settingId, targetTimeout);
 
-            const data = getJson(timerPath);
             if(data.hasOwnProperty(settingId)){
                 delete data[settingId];
             }
-            saveToPath(data, timerPath);
         } else {
             activeTimers.set(settingId, {
                 intervalId,
                 endTime
             });
-
-            const data = getJson(timerPath);
 
             remainingTime = !remainingTime ? delayTimeout : remaining
 
@@ -74,9 +84,13 @@ function startCountdownTimer(activeTimers, settingId, remainingTime, targetTimeo
                     targetTimeout
                 }
             }
-
-            saveToPath(data, timerPath);
         }
+
+        void writeData({
+            ...mainData,
+            timerInfo: data
+        });
+
     }, 1000);
 
     activeTimers.set(settingId, {

@@ -1,51 +1,25 @@
 const {app, BrowserWindow, Menu, ipcMain, dialog}  = require('electron');
 const path = require("path");
-const {exec, spawn} = require("child_process");
+const {exec} = require("child_process");
 const {Service} = require("node-windows");
 
-// Determine if we're in development or production
-const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
-
-// Helper function to get the correct file path
 function getAssetPath(fileName) {
-    if (isDev) {
-        return path.join(__dirname, fileName);
-    } else {
-        // In production, files are in the same directory as main.js
-        return path.join(__dirname, fileName);
-    }
+    return path.join(__dirname, fileName);
 }
 
-// Helper function to get HTML file path
 function getHtmlPath(fileName) {
     console.log(__dirname);
     return path.join(__dirname, fileName);
 }
 
-// Helper function to get data directory path
 function getDataPath() {
-    if (isDev) {
-        return path.join(__dirname, '..', 'data');
-    } else {
-        // In production, check if data is in resources/app or in extraResources
-        const appPath = path.dirname(__dirname);
-        const extraResourcesPath = path.join(appPath, '..', 'data');
-        const appDataPath = path.join(__dirname, 'data');
-
-        // Check which path exists
-        const fs = require('fs');
-        if (fs.existsSync(extraResourcesPath)) {
-            return extraResourcesPath;
-        } else if (fs.existsSync(appDataPath)) {
-            return appDataPath;
-        } else {
-            // Fallback to user data directory
-            return path.join(app.getPath('userData'), 'data');
-        }
+    const dataPath = path.join(app.getPath('userData'), 'data');
+    if (!fs.existsSync(dataPath)) {
+        fs.mkdirSync(dataPath, { recursive: true });
     }
+    return dataPath;
 }
 
-// Import modules with correct paths
 const {getPreference} = require(getAssetPath("store.js"));
 const {getInstalledAppInfo} = require(getAssetPath("installedApps.js"));
 const {enforceSafeSearch, isSafeSearchEnforced} = require(getAssetPath("safeSearchEnforcer.js"));
@@ -55,6 +29,7 @@ const {closeApp, appBlockProtection, settingsProtectionOn, blockProtectionEmitte
 const {configureSafeDNS, getActiveInterfaceName, isSafeDNS, dnsSuccessfullySetEvent} = require(getAssetPath("dnsProtection.js"));
 const {addWebsiteToHostsFile} = require(getAssetPath("blockDomain.js"));
 const {savePreference, checkSavedPreferences} = require(getAssetPath("store.js"));
+const fs = require("fs");
 
 let mainWindow = null;
 const activeTimers = new Map();
@@ -161,6 +136,7 @@ async function openDelaySettingDialogBox() {
     });
 
     await mainWindow.loadFile(getHtmlPath('delaySettingModal.html'));
+    mainWindow.webContents.openDevTools();
 }
 
 async function openBlockWindowForApps(){
@@ -195,7 +171,7 @@ async function openMainConfig(){
 }
 
 const getDelayTimeOut = () => {
-    const preferencesPath = 'data/savedPreferences.json';
+    const preferencesPath = path.join(getDataPath(), 'savedPreferences.json');
     const value = getPreference("delayTimeout", preferencesPath);
     if(value === null){
         return 3*60*1000;
@@ -283,10 +259,10 @@ function installMyService() {
                     });
                 }
             });
-        }, 5000); // Check every 5 seconds
+        }, 5000);
     });
 
-    svc.install(); // Or svc.uninstall(); to remove
+    svc.install();
 }
 
 
@@ -294,7 +270,6 @@ app.whenReady().then(async () => {
     console.log("dirName:", __dirname);
     settingsProtectionOn();
     appBlockProtection();
-    reactivateTimers();
 
     if(!isSafeSearchEnforced()){
         savePreference("enforceSafeSearch", false);
@@ -309,6 +284,7 @@ app.whenReady().then(async () => {
             savePreference("enableProtectiveDNS", false);
             refreshMainConfig();
         }
+        reactivateTimers();
     }, 4000);
 
     //installMyService();
@@ -450,6 +426,14 @@ ipcMain.on('start-delay-timeout-change', (event, newDelayValue) => {
     event.sender.send('sendTimeRemaining');
 });
 
+ipcMain.on('prime-block-for-deletion', (event, id) => {
+    startCountdownTimer(activeTimers, id, getDelayTimeOut(), null);
+});
+
+ipcMain.on('renderTableCall', (event) => {
+    event.sender.send('listeningForRenderTableCall');
+});
+
 ipcMain.handle('fetch-apps', async () => {
     const apps = await getInstalledApps();
     return apps.map(a => ({
@@ -541,8 +525,16 @@ async function showDelayAccountabilityDialogOrProgressDialog(settingId) {
 
 timerEvents.on('expired', (settingId) => turnOffSetting(settingId));
 
+timerEvents.on('renderTableCall', (event) => {
+    event.sender.send('listeningForRenderTableCall');
+});
+
 dnsSuccessfullySetEvent.on('dnsSuccessfullySet', () => refreshMainConfig());
 
 blockProtectionEmitter.on('flagAppWithOverlay', ({displayName, processName}) => {
     flagAppWithOverlay(displayName, processName);
+});
+
+ipcMain.handle('get-user-data-path', () => {
+    return path.join(app.getPath('userData'), 'data');
 });

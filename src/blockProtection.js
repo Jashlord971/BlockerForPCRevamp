@@ -1,11 +1,13 @@
 const {exec} = require("child_process");
 const {EventEmitter} = require("events");
 const {checkSavedPreferences} = require("./store.js");
-const {getPreference} = require("./store");
+const {readData} = require("./store");
+
+const { ipcRenderer } = require('electron');
 
 const blockProtectionEmitter = new EventEmitter();
 
-const flagAppWithOverlay = (displayName, processName) => blockProtectionEmitter.emit('flagAppWithOverlay', {displayName, processName});
+const flagAppWithOverlay = (displayName, processName) => ipcRenderer.send('flagWithOverlay', { displayName, processName });
 
 const processCache = {
     data: new Map(),
@@ -81,7 +83,8 @@ function appBlockProtection() {
     const activeOverlays = new Set();
 
     const getBlockedAppsList = () => {
-        const blockedLists = getPreference("blockedApps", "data/blockData.json");
+        const blockData = readData();
+        const blockedLists = blockData ? blockData.blockedApps : [];
         return blockedLists || [];
     };
 
@@ -96,11 +99,9 @@ function appBlockProtection() {
 
             let isRunning = false;
 
-            // Check by process name
             if (processInfo) {
                 isRunning = true;
             } else {
-                // Check by window title (more expensive, only if needed)
                 for (const [key, proc] of processMap) {
                     if (key !== '_meta' && proc.windowTitle &&
                         proc.windowTitle.toLowerCase().includes(displayName.toLowerCase())) {
@@ -127,6 +128,7 @@ function appBlockProtection() {
 
         monitoringInterval = setInterval(async () => {
             const isAppBlockingEnabled = checkSavedPreferences("overlayRestrictedContent");
+
 
             if (!isAppBlockingEnabled) {
                 clearInterval(monitoringInterval);

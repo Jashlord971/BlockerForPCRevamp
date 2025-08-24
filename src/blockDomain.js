@@ -3,9 +3,8 @@ const os = require('os');
 const sudoPrompt = require('sudo-prompt');
 const { get, set } = require('./store.js');
 
-const HOSTS_FILE = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
-
 async function blockDomain(baseDomain) {
+    const HOSTS_FILE = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
     if (!baseDomain) {
         console.error(`❌ Invalid domain or URL: ${baseDomain}`);
         return;
@@ -21,7 +20,7 @@ async function blockDomain(baseDomain) {
     const script = `
         const fs = require('fs');
         const os = require('os');
-        const path = "${HOSTS_FILE.replace(/\\/g, '\\\\')}";
+        const path = ${JSON.stringify(HOSTS_FILE)};
         const lines = ${JSON.stringify(lines)};
         let content = fs.readFileSync(path, 'utf8');
         lines.forEach(line => {
@@ -29,10 +28,13 @@ async function blockDomain(baseDomain) {
         });
         fs.writeFileSync(path, content, 'utf8');
         console.log("✅ Blocked: " + lines.join(', '));
-    `.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n\s+/g, ' ');
+    `.trim().replace(/\n\s+/g, ' ');
 
-    return new Promise ((resolve) => {
-        sudoPrompt.exec(`node -e "${script}"`, { name: 'Website Blocker' }, (error, stdout, stderr) => {
+    console.log("script:" + script);
+
+    return new Promise((resolve) => {
+        const command = `node -e "${script.replace(/"/g, '\\"')}"`;
+        sudoPrompt.exec(command, { name: 'Website Blocker' }, (error, stdout, stderr) => {
             if (error) {
                 console.error(`❌ Failed to block ${baseDomain}:`, error.message || stderr);
                 resolve(false);
@@ -40,9 +42,10 @@ async function blockDomain(baseDomain) {
             }
             console.log(stdout.trim());
             resolve(true);
-        })
+        });
     });
 }
+
 
 async function addWebsiteToHostsFile(event, domain){
     blockDomain(domain)
@@ -64,6 +67,7 @@ async function addWebsiteToHostsFile(event, domain){
 }
 
 function unblockDomain(domain) {
+    const HOSTS_FILE = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
     let content = fs.readFileSync(HOSTS_FILE, 'utf8');
 
     const regex = new RegExp(`^.*127\\.0\\.0\\.1\\s+(www\\.)?${domain}.*$`, 'gm');

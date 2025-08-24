@@ -1,6 +1,7 @@
 const {ipcRenderer} = require("electron");
 const {checkSavedPreferences, savePreference}  = require("./store.js");
 const {isSafeSearchEnforced} = require("./safeSearchEnforcer");
+const {appBlockProtection, settingsProtectionOn} = require("./blockProtection");
 
 const setChecked = (id, value) => {
     const element = document.getElementById(id);
@@ -48,6 +49,11 @@ function initializeOverlaySettingSwitch() {
             savePreference(id, true);
         }
     });
+}
+
+function turnOnSettings(){
+    appBlockProtection();
+    settingsProtectionOn();
 }
 
 const checkDnsSafety = async () => await ipcRenderer.invoke('check-dns-safety');
@@ -119,7 +125,6 @@ function initializeSafeSearchSwitch() {
 }
 
 function initializeTooltips() {
-    // Only initialize tooltips once
     const tooltipsInitialized = document.body.dataset.tooltipsInitialized;
     if (tooltipsInitialized) return;
     document.body.dataset.tooltipsInitialized = 'true';
@@ -153,7 +158,6 @@ function initializeTooltips() {
     });
 }
 
-// Initial setup - only run once on page load
 function initializeEventListeners() {
     initializeOverlaySettingSwitch();
     initializeProtectiveDNS();
@@ -163,16 +167,14 @@ function initializeEventListeners() {
     initializeTooltips();
 }
 
-// Full initialization (event listeners + UI state)
 function init() {
     initializeEventListeners();
     updateUIState();
+    turnOnSettings();
 }
 
-// Event listeners
 ipcRenderer.on('turnOffSetting', (event, id) => setChecked(id, false));
 
-// Use updateUIState instead of full init to avoid double initialization
 ipcRenderer.on('refreshMainConfig', () => updateUIState());
 
 window.addEventListener('DOMContentLoaded', () => init());
