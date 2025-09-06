@@ -1,0 +1,18 @@
+{
+  "blockedApps": [
+    {
+      "displayName": "Microsoft Edge",
+      "processName": "msedge.exe"
+    },
+    {
+      "displayName": "SecretFolder version 7.5.0.0",
+      "processName": "secretfolder.exe"
+    }
+  ],
+  "blockedWebsites": [
+    "bayerndeer.com"
+  ],
+  "allowedForUnblockWebsites": [],
+  "allowedForUnblockApps": [],
+  "timerInfo": {}
+}

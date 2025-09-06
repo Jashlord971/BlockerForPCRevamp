@@ -1,0 +1,20 @@
+{
+  "blockedApps": false,
+  "blockedWebsites": false,
+  "allowedForUnblockWebsites": false,
+  "allowedForUnblockApps": false,
+  "overlayRestrictedContent": true,
+  "enableProtectiveDNS": true,
+  "blockSettingsSwitch": true,
+  "appUninstallationProtection": true,
+  "enforceSafeSearch": true,
+  "delayTimeout": 0,
+  "timerInfo": {
+    "overlayRestrictedContent": {
+      "delayTimeout": 30000,
+      "remainingTime": 5851,
+      "startTimeStamp": 1756702142506,
+      "targetTimeout": null
+    }
+  }
+}

@@ -1,7 +1,21 @@
 const {app, BrowserWindow, Menu, ipcMain, dialog}  = require('electron');
 const path = require("path");
 const {exec} = require("child_process");
-const {Service} = require("node-windows");
+const util = require('util');
+const execPromise = util.promisify(exec);
+const {getInstalledAppInfo} = require(getAssetPath("installedApps.js"));
+const {getInstalledApps} = require("get-installed-apps");
+const {closeApp, appBlockProtection, settingsProtectionOn, blockProtectionEmitter} = require(getAssetPath("blockProtection.js"));
+const fs = require("fs");
+const sudoPrompt = require("sudo-prompt");
+const {isSafeSearchEnforced, enforceSafeSearch} = require("./safeSearchEnforcer");
+
+let mainWindow = null;
+const activeTimers = new Map();
+let overlayWindow = null;
+let dnsConfirmationModal = null;
+let delayAccountDialog = null;
+let flag = false;
 
 function getAssetPath(fileName) {
     return path.join(__dirname, fileName);
@@ -12,31 +26,16 @@ function getHtmlPath(fileName) {
     return path.join(__dirname, fileName);
 }
 
-function getDataPath() {
-    const dataPath = path.join(app.getPath('userData'), 'data');
-    if (!fs.existsSync(dataPath)) {
-        fs.mkdirSync(dataPath, { recursive: true });
+function getDataPath(fileName) {
+    const isDev = !app.isPackaged;
+    const basePath = isDev ? path.join(__dirname, 'data') : path.join(app.getPath('userData'), 'data');
+
+    if (!fs.existsSync(basePath)) {
+        fs.mkdirSync(basePath, { recursive: true });
     }
-    return dataPath;
+
+    return path.join(basePath, fileName);
 }
-
-const {getPreference} = require(getAssetPath("store.js"));
-const {getInstalledAppInfo} = require(getAssetPath("installedApps.js"));
-const {enforceSafeSearch, isSafeSearchEnforced} = require(getAssetPath("safeSearchEnforcer.js"));
-const {startCountdownTimer, timerEvents, reactivateTimers} = require(getAssetPath("timeHandler.js"));
-const {getInstalledApps} = require("get-installed-apps");
-const {closeApp, appBlockProtection, settingsProtectionOn, blockProtectionEmitter} = require(getAssetPath("blockProtection.js"));
-const {configureSafeDNS, getActiveInterfaceName, isSafeDNS, dnsSuccessfullySetEvent} = require(getAssetPath("dnsProtection.js"));
-const {addWebsiteToHostsFile} = require(getAssetPath("blockDomain.js"));
-const {savePreference, checkSavedPreferences} = require(getAssetPath("store.js"));
-const fs = require("fs");
-
-let mainWindow = null;
-const activeTimers = new Map();
-let overlayWindow = null;
-let dnsConfirmationModal = null;
-let delayAccountDialog = null;
-let flag = false;
 
 function createWindow() {
     mainWindow = new BrowserWindow({
@@ -59,6 +58,12 @@ function createWindow() {
     if(flag){
         makeWindowNotClosable(mainWindow);
     }
+}
+
+function checkSavedPreferences(id){
+    const filename = 'savedPreferences.json';
+    const data = readData(filename);
+    return data && data[id];
 }
 
 function makeWindowNotClosable(window){
@@ -122,18 +127,15 @@ function openBlockWindowForWebsites(){
 }
 
 async function openDelaySettingDialogBox() {
+    if(!mainWindow){
+
+    }
     mainWindow.backgroundColor = '#0047ab';
     mainWindow.webPreferences = {
         ...mainWindow.webPreferences,
         nodeIntegration: false,
         preload: getAssetPath('preload.js')
     };
-
-    mainWindow.webContents.once('did-finish-load', () => {
-        mainWindow.webContents.openDevTools();
-        const delayStatus = getDelayChangeStatus();
-        mainWindow.webContents.send('delayTimeout', delayStatus);
-    });
 
     await mainWindow.loadFile(getHtmlPath('delaySettingModal.html'));
     mainWindow.webContents.openDevTools();
@@ -171,9 +173,10 @@ async function openMainConfig(){
 }
 
 const getDelayTimeOut = () => {
-    const preferencesPath = path.join(getDataPath(), 'savedPreferences.json');
-    const value = getPreference("delayTimeout", preferencesPath);
-    if(value === null){
+    const filename = 'savedPreferences.json';
+    const preferences = readData(filename);
+    const value = preferences.delayTimeout;
+    if(!value){
         return 3*60*1000;
     }
     return value;
@@ -187,12 +190,13 @@ function getDelayChangeStatus() {
     if (timerInfo) {
         const now = Date.now();
         const timeRemaining = Math.max(timerInfo.endTime - now, 0);
+        const attribute = "newDelayValue";
 
         return {
             currentTimeout,
             isChanging: true,
             timeRemaining,
-            newValue: timerInfo.newDelayValue
+            newValue: timerInfo[attribute]
         };
     }
 
@@ -202,16 +206,13 @@ function getDelayChangeStatus() {
     };
 }
 
+
 async function isDnsMadeSafe(){
     const interfaceName = await getActiveInterfaceName();
     return isSafeDNS(interfaceName);
 }
 
-ipcMain.handle('check-dns-safety', async () => {
-    const value = await isDnsMadeSafe();
-    console.log("dnsSafety:", value);
-    return value;
-});
+ipcMain.handle('check-dns-safety', async () => await isDnsMadeSafe());
 
 function refreshMainConfig(){
     if(mainWindow && mainWindow.webContents){
@@ -219,58 +220,14 @@ function refreshMainConfig(){
     }
 }
 
-function installMyService() {
-    const electronAppPath = process.execPath;
-    const electronAppName = path.basename(electronAppPath, '.exe');
-
-    const svc = new Service({
-        name: 'ElectronAppMonitor',
-        description: 'Monitors the availability of your Electron application.',
-        script: path.join(__dirname, 'monitor-service.js'), // Point to this script itself
-        nodeOptions: [
-            '--harmony',
-            '--max_old_space_size=4096'
-        ]
-    });
-
-    svc.on('install', function() {
-        svc.start();
-        console.log('Service installed and started.');
-    });
-
-    svc.on('uninstall', function() {
-        console.log('Service uninstalled.');
-    });
-
-    svc.on('start', function() {
-        console.log('ElectronAppMonitor service started.');
-        setInterval(() => {
-            exec(`tasklist /FI "IMAGENAME eq ${electronAppName}"`, (error, stdout, stderr) => {
-                if (stdout.includes(electronAppName)) {
-                    console.log(`${electronAppName} is running.`);
-                } else {
-                    console.warn(`${electronAppName} is not running. Attempting to restart.`);
-                    exec(`start "" "${path.join(electronAppPath, electronAppName)}"`, (err) => {
-                        if (err) {
-                            console.error(`Failed to restart ${electronAppName}: ${err.message}`);
-                        } else {
-                            console.log(`${electronAppName} restarted.`);
-                        }
-                    });
-                }
-            });
-        }, 5000);
-    });
-
-    svc.install();
+function savePreference(id, value){
+    const filename = 'savedPreferences.json';
+    const preferences = readData(filename);
+    preferences[id] = value;
+    writeData(preferences, filename);
 }
 
-
 app.whenReady().then(async () => {
-    console.log("dirName:", __dirname);
-    settingsProtectionOn();
-    appBlockProtection();
-
     if(!isSafeSearchEnforced()){
         savePreference("enforceSafeSearch", false);
     }
@@ -279,7 +236,6 @@ app.whenReady().then(async () => {
 
     setTimeout(async () => {
         const value = await isDnsMadeSafe();
-        console.log("dnsSafety1 after delay:", value);
         if(!value){
             savePreference("enableProtectiveDNS", false);
             refreshMainConfig();
@@ -288,6 +244,8 @@ app.whenReady().then(async () => {
     }, 4000);
 
     //installMyService();
+    settingsProtectionOn();
+    appBlockProtection();
 });
 
 const closeDNSConfirmationWindow = () => {
@@ -385,13 +343,6 @@ function createOverlayWindow() {
     overlayWindow.webContents.openDevTools();
 }
 
-ipcMain.on('getAllInstalledApps', async (event) => {
-    const apps = await getInstalledAppInfo();
-    event.sender.send('installedAppsResult', JSON.parse(JSON.stringify(apps)));
-});
-
-ipcMain.on('addWebsiteToHostsFile', (event, { domain }) => void addWebsiteToHostsFile(event, domain));
-
 ipcMain.on('close-app-and-overlay', (event, { displayName, processName }) => {
     closeApp(processName, displayName).then(() => {
         if (overlayWindow) {
@@ -414,12 +365,18 @@ ipcMain.on('show-dns-dialog', () => showDNSConfirmationWindow());
 
 ipcMain.on('enforce-safe-search', (event) => {
     enforceSafeSearch().then(() => {
+        console.log("blah");
         savePreference("enforceSafeSearch", true);
         event.sender.send('refreshMainConfig');
     });
 });
 
-ipcMain.on('set-delay-timeout', (event, delayValue) => savePreference("delayTimeout", delayValue));
+ipcMain.on('set-delay-timeout', (event, delayValue) => {
+    const filename = 'savedPreferences.json';
+    const preferences = readData(filename);
+    preferences.delayTimeout = delayValue;
+    writeData(preferences, filename);
+});
 
 ipcMain.on('start-delay-timeout-change', (event, newDelayValue) => {
     startCountdownTimer(activeTimers, "delayTimeout", getDelayTimeOut(), newDelayValue);
@@ -431,17 +388,10 @@ ipcMain.on('prime-block-for-deletion', (event, id) => {
 });
 
 ipcMain.on('renderTableCall', (event) => {
-    event.sender.send('listeningForRenderTableCall');
+    event.sender.send('renderLatestTable');
 });
 
-ipcMain.handle('fetch-apps', async () => {
-    const apps = await getInstalledApps();
-    return apps.map(a => ({
-        name: a.appName,
-        id: a.appIdentifier,
-        icon: a.icon || null
-    }));
-});
+ipcMain.handle('getDelayChangeStatus', () => getDelayChangeStatus());
 
 ipcMain.on('close-both', () => {
     killControlPanel();
@@ -523,18 +473,260 @@ async function showDelayAccountabilityDialogOrProgressDialog(settingId) {
     delayAccountDialog.webContents.openDevTools();
 }
 
-timerEvents.on('expired', (settingId) => turnOffSetting(settingId));
-
-timerEvents.on('renderTableCall', (event) => {
-    event.sender.send('listeningForRenderTableCall');
-});
-
-dnsSuccessfullySetEvent.on('dnsSuccessfullySet', () => refreshMainConfig());
-
 blockProtectionEmitter.on('flagAppWithOverlay', ({displayName, processName}) => {
     flagAppWithOverlay(displayName, processName);
 });
 
-ipcMain.handle('get-user-data-path', () => {
-    return path.join(app.getPath('userData'), 'data');
+function readData(filename = 'savedPreferences.json') {
+    const dataPath = getDataPath(filename);
+
+    const defaultBlockData =  {
+        blockedApps: [],
+        blockedWebsites: [],
+        allowedForUnblockWebsites: [],
+        allowedForUnblockApps: []
+    }
+
+    if (!fs.existsSync(dataPath)){
+        return defaultBlockData;
+    }
+
+    try {
+        const raw = fs.readFileSync(dataPath, 'utf-8');
+        return JSON.parse(raw);
+    } catch (err) {
+        console.error(`[readData] Failed to read or parse data from ${dataPath}:`, err);
+        return defaultBlockData;
+    }
+}
+
+ipcMain.handle('getAllInstalledApps', async () => {
+    const apps = await getInstalledAppInfo();
+    if (!apps || apps.length === 0) {
+        return [];
+    }
+
+    try {
+        return apps.map(app => ({
+            displayName: app.displayName,
+            processName: app.processName
+        }));
+    } catch (error) {
+        console.log("Error while getting installed apps", error);
+        return [];
+    }
 });
+
+
+
+ipcMain.handle('getBlockData', async () => readData('blockData.json'));
+
+ipcMain.handle('getPreferences', async () => readData('savedPreferences.json'));
+
+ipcMain.on('saveData', (event, args) => {
+    writeData(args.data, args.fileName);
+});
+
+function writeData(data, filename) {
+    const dataPath = getDataPath(filename);
+    if (fs.existsSync(dataPath)) {
+        const stat = fs.lstatSync(dataPath);
+        if (stat.isDirectory()) {
+            fs.rmdirSync(dataPath, { recursive: true });
+        }
+    }
+
+    const dir = path.dirname(dataPath);
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
+
+    fs.writeFileSync(dataPath, JSON.stringify(data, null, 2));
+}
+
+function reactivateTimers(activeTimers) {
+    const filename = 'timers.json';
+    const data = readData(filename);
+
+    Object.keys(data).forEach(settingId => {
+        const timer = data[settingId];
+        const elapsed = Date.now() - timer.startTimeStamp;
+        const remaining = timer.delayTimeout - elapsed;
+
+        if (remaining > 0) {
+            console.log("starting timer for :", settingId + " with a remaining time: ", remaining);
+            startCountdownTimer(activeTimers, settingId, remaining);
+        } else {
+            handleExpiration(settingId, timer.targetTimeout);
+        }
+    });
+}
+
+function renderTable() {
+    if (!mainWindow) return;
+
+    return mainWindow.webContents
+        .executeJavaScript(`document.body.innerHTML`)
+        .then(html => {
+            if (html.includes("blockTableForApps") || html.includes("blockTableForWebsites")) {
+                mainWindow.webContents.send('renderLatestTable');
+            }
+        })
+        .catch(err => console.error("Error checking HTML content:", err));
+}
+
+function handleExpiration(settingId, targetTimeout){
+    const delimiter = '-->';
+    if(settingId === "delayTimeout"){
+        savePreference(settingId, targetTimeout);
+    }
+    else if(settingId.includes(delimiter)){
+        const splits = settingId.split(delimiter);
+        const key = splits[0];
+        const item = splits[1];
+
+        const keyInBlockData = (key === 'site') ? 'allowedForUnblockWebsites' : 'allowedForUnblockApps';
+        let blockData = readData('savedPreferences.json');
+        if(!blockData.hasOwnProperty(keyInBlockData)){
+            blockData[keyInBlockData] = [];
+        }
+
+        blockData[keyInBlockData].push(item);
+        renderTable();
+    }
+    else{
+        savePreference(settingId, false);
+    }
+    turnOffSetting(settingId);
+}
+
+function startCountdownTimer(activeTimers, settingId, remainingTime, targetTimeout = null) {
+    //const delayTimeout = getPreference("delayTimeout", preferencesPath);
+    const filename = 'savedPreferences.json';
+    const delayTimeout = 30000;
+    const startTimeStamp = Date.now();
+    const endTime = startTimeStamp + delayTimeout;
+    const mainData = readData(filename);
+
+    const intervalId = setInterval(() => {
+        const now = Date.now();
+        const remaining = Math.max(endTime - now, 0);
+
+        const data = mainData?.timerInfo ?? {};
+
+        if (remaining <= 0) {
+            clearInterval(intervalId);
+            activeTimers.delete(settingId);
+
+            void handleExpiration(settingId, targetTimeout);
+
+            if(data.hasOwnProperty(settingId)){
+                delete data[settingId];
+            }
+        } else {
+            activeTimers.set(settingId, {
+                intervalId,
+                endTime
+            });
+
+            remainingTime = !remainingTime ? delayTimeout : remaining
+
+            if(!data[settingId]){
+                data[settingId] = {
+                    delayTimeout,
+                    remainingTime,
+                    startTimeStamp,
+                    targetTimeout
+                }
+            }
+        }
+
+        const blockData = readData(filename);
+        void writeData({
+            ...blockData,
+            timerInfo: data
+        }, filename);
+
+    }, 1000);
+
+    activeTimers.set(settingId, {
+        intervalId,
+        endTime
+    });
+
+    console.log(`🟢 Started timer for ${settingId}`);
+}
+
+async function getActiveInterfaceName() {
+    const { stdout } = await execPromise('netsh interface show interface');
+
+    const lines = stdout.split('\n');
+    for (const line of lines) {
+        if (line.includes('Connected') && line.includes('Enabled')) {
+            const parts = line.trim().split(/\s{2,}/);
+            return parts[parts.length - 1];
+        }
+    }
+    throw new Error('No active interface found.');
+}
+
+async function configureSafeDNS(isStrict) {
+    const safifyDNS = (interfaceName, isStrict) => {
+        const getPrimaryAndSecondaryDNS = (isStrict) => {
+            if(isStrict){
+                return ['185.228.168.168', '185.228.169.168'];
+            }
+            return ['208.67.222.123', '208.67.220.123']
+        }
+
+        const [primaryDNS, secondaryDNS] = getPrimaryAndSecondaryDNS(isStrict);
+
+        const options = {
+            name: 'SafeDNS Configurator'
+        };
+
+        const command = `netsh interface ipv4 set dns name="${interfaceName}" static ${primaryDNS} primary && netsh interface ipv4 add dns name="${interfaceName}" ${secondaryDNS} index=2`;
+
+        try{
+            sudoPrompt.exec(command, options, (error, stdout, stderr) => {
+                if (error) {
+                    console.error('Failed to set DNS:', error);
+                    return;
+                }
+                if (stderr) {
+                    console.error('stderr:', stderr);
+                    return;
+                }
+                console.log('DNS set successfully:', stdout);
+                savePreference( "enableProtectiveDNS", true);
+                refreshMainConfig();
+            });
+        } catch (e){
+            console.log("user likely didnt grant permission");
+        }
+    }
+
+    try {
+        getActiveInterfaceName()
+            .then((interfaceName) => safifyDNS(interfaceName, isStrict))
+            .catch((error) => {
+                console.log("Error while getting active interface name", error);
+            });
+    } catch (err) {
+        console.error('Failed to configure DNS:', err.message);
+    }
+}
+
+async function isSafeDNS(interfaceName) {
+    try {
+        const { stdout } = await exec(`netsh interface ipv4 show dnsservers name="${interfaceName}"`);
+        return stdout.some(entry => {
+            const stringedEntry = JSON.stringify(entry);
+            return (stringedEntry.includes('185.228.168.168') && stringedEntry.includes('185.228.169.168')) ||
+                (stringedEntry.includes('208.67.222.123') && stringedEntry.includes('208.67.220.123'))
+        });
+    } catch (err) {
+        console.error('Failed to read DNS settings:', err);
+        return [];
+    }
+}

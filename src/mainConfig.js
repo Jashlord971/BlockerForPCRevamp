@@ -1,5 +1,4 @@
 const {ipcRenderer} = require("electron");
-const {checkSavedPreferences, savePreference}  = require("./store.js");
 const {isSafeSearchEnforced} = require("./safeSearchEnforcer");
 const {appBlockProtection, settingsProtectionOn} = require("./blockProtection");
 
@@ -14,7 +13,7 @@ const showDelayChangeOrAccountabilityPartnerPrompt = (id) => ipcRenderer.send('s
 
 const showDNSSelectionPrompt = () => ipcRenderer.send('show-dns-dialog');
 
-function updateUIState() {
+async function updateUIState() {
     const switchIds = [
         'enableProtectiveDNS',
         'overlayRestrictedContent',
@@ -23,13 +22,13 @@ function updateUIState() {
         'enforceSafeSearch'
     ];
 
-    switchIds.forEach(id => {
+    for (const id of switchIds) {
         const element = document.getElementById(id);
         if (element) {
-            const value = checkSavedPreferences(id);
+            const value = await checkSavedPreferences(id);
             element.checked = !!value;
         }
-    });
+    }
 }
 
 function initializeOverlaySettingSwitch() {
@@ -39,14 +38,14 @@ function initializeOverlaySettingSwitch() {
     if (!overlaySettingsSwitch || overlaySettingsSwitch._hasListener) return;
     overlaySettingsSwitch._hasListener = true;
 
-    overlaySettingsSwitch.addEventListener("change", function (e) {
-        const savedValue = checkSavedPreferences(id);
+    overlaySettingsSwitch.addEventListener("change", async () => {
+        const savedValue = await checkSavedPreferences(id);
 
         if (savedValue === true) {
             overlaySettingsSwitch.checked = true;
             showDelayChangeOrAccountabilityPartnerPrompt(id);
         } else {
-            savePreference(id, true);
+            void savePreference(id, true);
         }
     });
 }
@@ -66,12 +65,12 @@ function initializeProtectiveDNS() {
     protectiveDNS._hasListener = true;
 
     protectiveDNS.addEventListener("change", async () => {
-        const savedValue = checkSavedPreferences(id);
+        const savedValue = await checkSavedPreferences(id);
         const isDnsSafeAlready = await checkDnsSafety();
 
         if (isDnsSafeAlready && !!!savedValue) {
             protectiveDNS.checked = true;
-            savePreference(id, true);
+            void savePreference(id, true);
         } else if (!!savedValue) {
             protectiveDNS.checked = true;
             showDelayChangeOrAccountabilityPartnerPrompt(id);
@@ -87,13 +86,14 @@ function initializeGenericSwitch(id) {
     if (!settingsProtection || settingsProtection._hasListener) return;
     settingsProtection._hasListener = true;
 
-    settingsProtection.addEventListener("change", () => {
-        const savedValue = checkSavedPreferences(id);
+    settingsProtection.addEventListener("change", async () => {
+        const savedValue = await checkSavedPreferences(id);
         if (!!savedValue) {
             settingsProtection.checked = true;
             showDelayChangeOrAccountabilityPartnerPrompt(id);
         } else {
-            savePreference(id, true);
+            const currentValue = await checkSavedPreferences(id);
+            void savePreference(id, !currentValue);
         }
     });
 }
@@ -105,12 +105,12 @@ function initializeSafeSearchSwitch() {
     if (!safeSearchSwitch || safeSearchSwitch._hasListener) return;
     safeSearchSwitch._hasListener = true;
 
-    safeSearchSwitch.addEventListener("change", () => {
-        const savedValue = checkSavedPreferences(id);
+    safeSearchSwitch.addEventListener("change", async () => {
+        const savedValue = await checkSavedPreferences(id);
 
         if (isSafeSearchEnforced() && !savedValue) {
             safeSearchSwitch.checked = true;
-            savePreference(id, true);
+            void savePreference(id, true);
             return;
         }
 
@@ -130,7 +130,7 @@ function initializeTooltips() {
     document.body.dataset.tooltipsInitialized = 'true';
 
     document.querySelectorAll('.info-icon').forEach(icon => {
-        icon.addEventListener('mouseenter', (e) => {
+        icon.addEventListener('mouseenter', () => {
             const existing = document.querySelector('.tooltip-box');
             if (existing) existing.remove();
 
@@ -169,8 +169,8 @@ function initializeEventListeners() {
 
 function init() {
     initializeEventListeners();
-    updateUIState();
-    turnOnSettings();
+    updateUIState()
+        .then(() => turnOnSettings());
 }
 
 ipcRenderer.on('turnOffSetting', (event, id) => setChecked(id, false));
@@ -178,3 +178,17 @@ ipcRenderer.on('turnOffSetting', (event, id) => setChecked(id, false));
 ipcRenderer.on('refreshMainConfig', () => updateUIState());
 
 window.addEventListener('DOMContentLoaded', () => init());
+
+async function checkSavedPreferences(id){
+    const preferences = await ipcRenderer.invoke('getPreferences');
+    return preferences && !!preferences[id];
+}
+
+async function savePreference(id, value){
+    const preferences = await ipcRenderer.invoke('getPreferences');
+    preferences[id] = value;
+    ipcRenderer.send('saveData', {
+        data: preferences,
+        fileName: 'savedPreferences.json'
+    });
+}

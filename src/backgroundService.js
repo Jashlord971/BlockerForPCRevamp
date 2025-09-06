@@ -86,3 +86,51 @@ svc.on('error', (error) => {
 // Install the service
 log('Attempting to install EagleBlocker service...');
 svc.install();
+
+/*
+function installMyService() {
+    const electronAppPath = process.execPath;
+    const electronAppName = path.basename(electronAppPath, '.exe');
+
+    const svc = new Service({
+        name: 'ElectronAppMonitor',
+        description: 'Monitors the availability of your Electron application.',
+        script: path.join(__dirname, 'monitor-service.js'), // Point to this script itself
+        nodeOptions: [
+            '--harmony',
+            '--max_old_space_size=4096'
+        ]
+    });
+
+    svc.on('install', function() {
+        svc.start();
+        console.log('Service installed and started.');
+    });
+
+    svc.on('uninstall', function() {
+        console.log('Service uninstalled.');
+    });
+
+    svc.on('start', function() {
+        console.log('ElectronAppMonitor service started.');
+        setInterval(() => {
+            exec(`tasklist /FI "IMAGENAME eq ${electronAppName}"`, (error, stdout, stderr) => {
+                if (stdout.includes(electronAppName)) {
+                    console.log(`${electronAppName} is running.`);
+                } else {
+                    console.warn(`${electronAppName} is not running. Attempting to restart.`);
+                    exec(`start "" "${path.join(electronAppPath, electronAppName)}"`, (err) => {
+                        if (err) {
+                            console.error(`Failed to restart ${electronAppName}: ${err.message}`);
+                        } else {
+                            console.log(`${electronAppName} restarted.`);
+                        }
+                    });
+                }
+            });
+        }, 5000);
+    });
+
+    svc.install();
+}
+ */

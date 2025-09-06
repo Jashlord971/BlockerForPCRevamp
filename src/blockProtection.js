@@ -1,7 +1,5 @@
 const {exec} = require("child_process");
 const {EventEmitter} = require("events");
-const {checkSavedPreferences} = require("./store.js");
-const {readData} = require("./store");
 
 const { ipcRenderer } = require('electron');
 
@@ -82,8 +80,8 @@ function appBlockProtection() {
     let monitoringInterval = null;
     const activeOverlays = new Set();
 
-    const getBlockedAppsList = () => {
-        const blockData = readData();
+    const getBlockedAppsList = async () => {
+        const blockData = await ipcRenderer.invoke('getBlockData');
         const blockedLists = blockData ? blockData.blockedApps : [];
         return blockedLists || [];
     };
@@ -189,13 +187,13 @@ function settingsProtectionOn() {
 
         if (!meta) return;
 
-        if (meta.controlPanelOpen) {
-            console.log("⚠️ Control Panel is open!");
-            exec(`powershell -Command "$cp = Get-Process | Where-Object { $_.MainWindowTitle -match 'Control Panel' }; $cp | ForEach-Object { $_.CloseMainWindow() }"`,
-                (err) => {
-                    if (!err) console.log('✅ Attempted to close Control Panel');
-                });
-        }
+        exec(`powershell -Command "$cp = Get-Process | Where-Object { $_.MainWindowTitle -match 'Control Panel' }; $cp | ForEach-Object { $_.CloseMainWindow() }"`,
+            (err) => {
+                if (!err){
+                    console.log('✅ Attempted to close Control Panel');
+                    flagAppWithOverlay('Control Panel', 'control.exe');
+                }
+            });
 
         if (meta.notepadHostsOpen) {
             flagAppWithOverlay('Notepad', 'notepad.exe');
@@ -210,6 +208,14 @@ function settingsProtectionOn() {
 
         return settingsInterval;
     }
+}
+
+function checkSavedPreferences(id){
+    if(!ipcRenderer){
+        return false;
+    }
+    const preferences = ipcRenderer.invoke('getPreferences');
+    return preferences && preferences[id];
 }
 
 module.exports = {

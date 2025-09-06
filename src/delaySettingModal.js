@@ -1,121 +1,90 @@
 const { ipcRenderer } = require('electron');
 
-const customRadio = document.getElementById('customRadio');
-const customInput = document.getElementById('customInput');
-const customDays = document.getElementById('customDays');
-
-const confirmBtn = document.getElementById('confirmBtn');
-const delayTimesDialog = document.getElementById("delayTimes");
-const progressContainer = document.getElementById('progressContainer');
-
-let delayTimeoutValue;
-
-function validateForm() {
-    confirmBtn.disabled = !shouldEnableConfirmButton();
+async function validateForm() {
+    const confirmBtn = document.getElementById('confirmBtn');
+    confirmBtn.disabled = await shouldDisableConfirmButton();
 }
 
-function shouldEnableConfirmButton() {
+async function getCurrentDelayTimeout(){
+    const blockData = await ipcRenderer.invoke('getPreferences');
+    const defaultDelay = 180000;
+    return blockData ? (blockData["delayTimeout"] ?? defaultDelay) : defaultDelay;
+}
+
+async function shouldDisableConfirmButton() {
     const selected = document.querySelector('input[name="delay"]:checked');
-    if (!selected) {
-        return false;
-    }
-    if (selected.value === 'custom') {
-        const days = parseFloat(customDays.value);
-        if (isNaN(days) || days <= 0 || delayTimeoutValue === days * 24 * 60 * 60 * 1000){
+    if (!selected) return true;
+
+    const delayTimeoutValue = await getCurrentDelayTimeout();
+    const value = selected['value'];
+
+    if (value !== 'custom') {
+        try {
+            const currentValue = eval(value);
+            return currentValue === delayTimeoutValue;
+        } catch {
             return false;
         }
     }
-    else {
-        if (eval(selected.value) === delayTimeoutValue){
-            return false;
-        }
+
+    const customDays = parseFloat(document.getElementById('customDays')['value']);
+
+    if (isNaN(customDays) || customDays <= 0) {
+        return true;
     }
-    return true;
+
+    const millis = customDays * 24 * 60 * 60 * 1000;
+    return millis === delayTimeoutValue;
 }
 
-document.querySelectorAll('input[name="delay"]').forEach(radio => {
-    radio.addEventListener('change', () => {
-        customInput.style.display = customRadio.checked ? 'block' : 'none';
-        validateForm();
-    });
-});
 
-customDays.addEventListener('input', validateForm);
-
-confirmBtn.addEventListener('click', () => {
-    let selectedValue = eval(document.querySelector('input[name="delay"]:checked')?.value);
-
+function getSelectedValue(selectedValues){
+    if(!selectedValues){
+        return null;
+    }
+    const selectedValue = eval(selectedValues['value']);
     if (selectedValue === 'custom') {
-        const days = parseFloat(customDays.value);
+        const customDays = document.getElementById('customDays');
+        const days = parseFloat(customDays['value']);
         if (isNaN(days) || days <= 0) {
             alert("Please enter a valid custom delay in days.");
             return;
         }
-        selectedValue = days * 24 * 60 * 60 * 1000;
+        return days * 24 * 60 * 60 * 1000;
     }
     else {
-        selectedValue = parseInt(selectedValue);
+        return parseInt(selectedValue);
+    }
+}
+
+function initializeConfirmButton(confirmBtn){
+    if(!confirmBtn){
+        return;
     }
 
-    if(selectedValue !== delayTimeoutValue) {
-        if (selectedValue > delayTimeoutValue) {
-            ipcRenderer.send('set-delay-timeout', selectedValue);
-            confirmBtn.disabled = true;
-            location.reload();
-        }
-        else {
-            ipcRenderer.send('start-delay-timeout-change', selectedValue);
-            showProgressBar(delayTimeoutValue, delayTimeoutValue);
-        }
-    }
-});
+    confirmBtn.addEventListener('click', async () => {
+        const selector = 'input[name="delay"]:checked';
+        const selectedValues = document.querySelector(selector);
+        const selectedValue = getSelectedValue(selectedValues);
 
-ipcRenderer.on('delayTimeout', (event, status) => {
-    console.log("delayValue (ms):", status);
+        const delayTimeoutValue = await getCurrentDelayTimeout();
 
-    delayTimeoutValue = status.currentTimeout;
-
-    if (!delayTimeoutValue || isNaN(delayTimeoutValue)) return;
-
-    const radioButtons = document.querySelectorAll('input[name="delay"]');
-    let matched = false;
-
-    for (const radio of radioButtons) {
-        const value = radio.value;
-
-        if (value === 'custom') continue;
-
-        try {
-            const evaluated = eval(value);
-            if (evaluated === delayTimeoutValue) {
-                radio.checked = true;
-                customInput.style.display = 'none';
-                matched = true;
-                break;
+        if(selectedValue !== delayTimeoutValue) {
+            if (selectedValue > delayTimeoutValue) {
+                ipcRenderer.send('set-delay-timeout', selectedValue);
+                confirmBtn.disabled = true;
+                location.reload();
             }
-        } catch (e) {
-            console.warn(`Invalid radio value expression: ${value}`);
+            else {
+                ipcRenderer.send('start-delay-timeout-change', selectedValue);
+                showProgressBar(delayTimeoutValue, delayTimeoutValue);
+            }
         }
-    }
+    });
+}
 
-    if (!matched) {
-        customRadio.checked = true;
-        customInput.style.display = 'block';
-        const days = delayTimeoutValue / (24 * 60 * 60 * 1000);
-        customDays.value = days.toFixed(2);
-    }
-
-    if (status.isChanging) {
-        showProgressBar(status.timeRemaining, status.currentTimeout);
-    }
-
-
-    validateForm();
-});
-
-const cancelButton = document.getElementById("cancelBtn");
-
-if(cancelButton){
+function initializeCancelButton(confirmBtn, progressContainer, delayTimesDialog){
+    const cancelButton = document.getElementById("cancelBtn");
     cancelButton.addEventListener('click', () => {
         confirmBtn.disabled = true;
         progressContainer.style.display = 'none';
@@ -125,14 +94,16 @@ if(cancelButton){
 }
 
 function showProgressBar(timeRemaining, currentTimeout){
+    const delayTimesDialog = document.getElementById("delayTimes");
+    const progressContainer = document.getElementById('progressContainer');
+
     delayTimesDialog.style.display = 'none';
     progressContainer.style.display = 'block';
 
     const endTime = Date.now() + timeRemaining;
 
     const updateProgress = () => {
-        const now = Date.now();
-        const remaining = Math.max(endTime - now, 0);
+        const remaining = Math.max(endTime - Date.now(), 0);
         const percent = 100 - Math.floor((remaining / currentTimeout) * 100);
 
         document.getElementById('timeRemaining').innerText = `${Math.ceil(remaining / 1000)}s`;
@@ -142,6 +113,8 @@ function showProgressBar(timeRemaining, currentTimeout){
             clearInterval(interval);
             progressContainer.style.display = 'none';
             delayTimesDialog.style.display = 'block';
+
+            const confirmBtn = document.getElementById('confirmBtn');
             confirmBtn.disabled = true;
         }
     };
@@ -149,3 +122,66 @@ function showProgressBar(timeRemaining, currentTimeout){
     updateProgress();
     const interval = setInterval(updateProgress, 1000);
 }
+
+async function init(){
+    const customRadio = document.getElementById('customRadio');
+    const customInput = document.getElementById('customInput');
+
+    const confirmBtn = document.getElementById('confirmBtn');
+    const delayTimesDialog = document.getElementById("delayTimes");
+    const progressContainer = document.getElementById('progressContainer');
+
+    initializeConfirmButton(confirmBtn);
+    initializeCancelButton(confirmBtn, progressContainer, delayTimesDialog);
+
+    const customDays = document.getElementById('customDays');
+    customDays.addEventListener('input', validateForm);
+
+    document.querySelectorAll('input[name="delay"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+            customInput.style.display = customRadio['checked'] ? 'block' : 'none';
+            void validateForm();
+        });
+    });
+
+    await setCurrentDelayTimeout(customInput, customDays, customRadio);
+
+    const status = await ipcRenderer.invoke('getDelayChangeStatus');
+    if (status && status.isChanging) {
+        showProgressBar(status.timeRemaining, status.currentTimeout);
+    }
+
+    void validateForm();
+}
+
+async function setCurrentDelayTimeout(customInput, customDays, customRadio){
+    const delayTimeoutValue = await getCurrentDelayTimeout();
+    if (isNaN(delayTimeoutValue)){
+        return;
+    }
+
+    const radioButtons = document.querySelectorAll('input[name="delay"]');
+
+    const matched = Array.from(radioButtons)
+        .filter(radio => radio && radio['value'] && radio['value'] !== 'custom')
+        .find(radio => {
+            try{
+                const value = eval(radio['value']);
+                return value === delayTimeoutValue;
+            } catch(error){
+                return false;
+            }
+        });
+
+    if(matched){
+        matched.checked = true;
+        customInput.style.display = 'none';
+    } else {
+        customRadio.checked = true;
+        customInput.style.display = 'block';
+        const days = delayTimeoutValue / (24 * 60 * 60 * 1000);
+        customDays.value = days.toFixed(2);
+    }
+}
+
+void init();

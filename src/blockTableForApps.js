@@ -1,35 +1,26 @@
 const { ipcRenderer } = require('electron');
-const store = require('./store.js');
+const filename = 'blockData.json';
 
-let allInstalledApps = [];
-const key = 'blockedApps';
+ipcRenderer.on('renderLatestTable', () => renderTable());
 
-ipcRenderer.on('load-type', (event, type) => {
-    renderTable();
-});
-
-function renderTable() {
-    const list = store.get(key, []);
+async function renderTable() {
+    const list = await getBlockedAppsList();
     const tbody = document.querySelector('#data-table tbody');
     tbody.innerHTML = '';
 
     list.forEach((item, index) => {
+        if(!document){
+            return;
+        }
         const row = document.createElement('tr');
 
         const nameCell = document.createElement('td');
         nameCell.textContent = item.displayName;
 
         const deleteCell = document.createElement('td');
-        const deleteButton = document.createElement('button');
-        deleteButton.textContent = 'Delete';
-        deleteButton.style.backgroundColor = '#FF5555';
-        deleteButton.style.color = '#fff';
-        deleteButton.style.border = 'none';
-        deleteButton.style.padding = '5px 10px';
-        deleteButton.style.borderRadius = '5px';
-        deleteButton.style.cursor = 'pointer';
+        const deleteButton = getDeleteButton();
         deleteButton.onclick = () => removeItem(index);
-        deleteCell.appendChild(deleteButton);
+        deleteCell.appendChild(getDeleteButton());
 
         row.appendChild(nameCell);
         row.appendChild(deleteCell);
@@ -37,32 +28,56 @@ function renderTable() {
     });
 }
 
-window.removeItem = function(index) {
-    const key = 'blockedApps';
-    const list = store.get(key, []);
-    list.splice(index, 1);
-    store.set(key, list);
-    renderTable();
-};
+function getDeleteButton(text = 'Delete') {
+    const button = document.createElement('button');
+    button.textContent = text;
+    button.style.backgroundColor = '#FF5555';
+    button.style.color = '#fff';
+    button.style.border = 'none';
+    button.style.padding = '5px 10px';
+    button.style.borderRadius = '5px';
+    button.style.cursor = 'pointer';
+    return button;
+}
 
-window.addEventListener('DOMContentLoaded', () => {
+async function removeItemAtIndex (index){
+    const list = await getBlockedAppsList();
+    if(list.length  !== 0){
+        list.splice(index, 1);
+        return saveBlockedAppsList(list)
+            .then(() => {
+                console.log("Deletion of object at index: " + index + " was successful");
+                renderTable();
+            })
+            .catch(error => console.log(error));
+    }
+    return Promise.resolve(undefined);
+}
+
+window.removeItem = async function(index) {
+    await removeItemAtIndex(index);
+}
+
+async function getAllInstalledApps(){
+    return await ipcRenderer.invoke('getAllInstalledApps');
+}
+
+window.addEventListener('DOMContentLoaded', async () => {
     const modal = document.getElementById('modal');
     const input = document.getElementById('modal-input');
     const saveBtn = document.getElementById('save-btn');
     const cancelBtn = document.getElementById('cancel-btn');
     const addBtn = document.getElementById('add-btn');
-    const topCancelButton = document.getElementById("closeAppModal");
-
-    ipcRenderer.send('getAllInstalledApps');
 
     const title = document.getElementById('title');
     title.innerText = 'Blocked Apps';
 
-    renderTable();
+    void renderTable();
 
-    addBtn.addEventListener('click', () => {
-        const list = store.get('blockedApps', []);
+    addBtn.addEventListener('click', async () => {
+        const list = await getBlockedAppsList();
         const blockedProcessNames = new Set(list.map(app => app.processName));
+        const allInstalledApps = await getAllInstalledApps();
         const apps = allInstalledApps.filter(app => !blockedProcessNames.has(app.processName));
         renderAppSearchModal(apps);
     });
@@ -71,24 +86,22 @@ window.addEventListener('DOMContentLoaded', () => {
         modal.style.display = 'none';
     });
 
-    saveBtn.addEventListener('click', () => {
-        const value = input.value.trim();
+    saveBtn.addEventListener('click', async() => {
+        const attribute = 'value';
+        const value = (input[attribute]).trim();
         if (value){
-            const list = store.get(key, []);
+            const blockData = await ipcRenderer.invoke('getBlockData');
+            const list = blockData.blockedApps;
             list.push(value);
-            store.set(key, list);
-            renderTable();
+            blockData.blockedApps = list;
+            ipcRenderer.send('saveData', {
+                data: blockData,
+                fileName: filename
+            });
+            void renderTable();
             modal.style.display = 'none';
         }
     });
-
-    topCancelButton.addEventListener('click', () => {
-        modal.style.display = 'none';
-    });
-});
-
-ipcRenderer.on('installedAppsResult', async (_, apps) => {
-    allInstalledApps = apps.filter(app => app.displayName);
 });
 
 function renderAppSearchModal(apps) {
@@ -113,8 +126,10 @@ function renderAppSearchModal(apps) {
             selectCell.appendChild(checkbox);
 
             const nameCell = document.createElement('td');
+            console.log(app.displayName);
             nameCell.textContent = app.displayName;
             nameCell.style.padding = '10px';
+            nameCell.style.color = 'black';
 
             row.appendChild(selectCell);
             row.appendChild(nameCell);
@@ -137,13 +152,12 @@ function renderAppSearchModal(apps) {
         modal.style.display = 'none';
     };
 
-    blockBtn.onclick = () => {
+    blockBtn.onclick = async () => {
         const checkboxes = tbody.querySelectorAll('input[type="checkbox"]:checked');
-        const key = 'blockedApps';
-        const list = store.get(key, []);
+        const list = await getBlockedAppsList();
 
         checkboxes.forEach(cb => {
-            const processName = cb.dataset.processName;
+            const processName = cb?.dataset?.processName;
             const alreadyBlocked = list.some(app => app.processName === processName);
             if (!alreadyBlocked) {
                 const app = apps.find(a => a.processName === processName);
@@ -151,10 +165,36 @@ function renderAppSearchModal(apps) {
             }
         });
 
-        store.set(key, list);
-        renderTable();
-        modal.style.display = 'none';
+        return saveBlockedAppsList(list)
+            .then(async () => {
+                await renderTable();
+                modal.style.display = 'none';
+            })
+            .catch(error => console.log(error));
     };
 
     modal.style.display = 'block';
+
+    const appSelectionModal = document.getElementById('appSelectionModal');
+    const topCancelButton = document.getElementById("closeAppModal");
+    topCancelButton.addEventListener('click', () => {
+        appSelectionModal.style.display = 'none';
+    });
+}
+
+async function getBlockedAppsList(){
+    const blockData = await ipcRenderer.invoke('getBlockData');
+    return blockData.blockedApps || [];
+}
+
+async function saveBlockedAppsList(newList){
+    const blockData = await ipcRenderer.invoke('getBlockData');
+    const newData = {
+        ...blockData,
+        blockedApps: newList
+    }
+    ipcRenderer.send('saveData', {
+        data: newData,
+        fileName: filename
+    });
 }
