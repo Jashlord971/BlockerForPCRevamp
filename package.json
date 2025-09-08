@@ -35,7 +35,9 @@
       {
         "from": "data",
         "to": "data",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "directories": {
@@ -55,6 +57,7 @@
   },
   "dependencies": {
     "get-installed-apps": "^1.1.1",
+    "lodash": "^4.17.21",
     "node-windows": "^1.0.0-beta.8",
     "ps-node": "^0.1.6",
     "react": "^19.1.1",

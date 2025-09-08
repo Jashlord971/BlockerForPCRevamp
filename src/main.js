@@ -3,12 +3,10 @@ const path = require("path");
 const {exec} = require("child_process");
 const util = require('util');
 const execPromise = util.promisify(exec);
-const {getInstalledAppInfo} = require(getAssetPath("installedApps.js"));
-const {getInstalledApps} = require("get-installed-apps");
-const {closeApp, appBlockProtection, settingsProtectionOn, blockProtectionEmitter} = require(getAssetPath("blockProtection.js"));
+const {getInstalledApps}  = require("get-installed-apps");
 const fs = require("fs");
 const sudoPrompt = require("sudo-prompt");
-const {isSafeSearchEnforced, enforceSafeSearch} = require("./safeSearchEnforcer");
+const _ = require("lodash");
 
 let mainWindow = null;
 const activeTimers = new Map();
@@ -16,6 +14,9 @@ let overlayWindow = null;
 let dnsConfirmationModal = null;
 let delayAccountDialog = null;
 let flag = false;
+let overlayQueue = [];
+
+const HOSTS_PATH = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
 
 function getAssetPath(fileName) {
     return path.join(__dirname, fileName);
@@ -69,9 +70,7 @@ function checkSavedPreferences(id){
 function makeWindowNotClosable(window){
     if(window){
         window.on('close', (e) => {
-            const hasAppProtection = checkSavedPreferences("appUninstallationProtection");
-
-            if (!hasAppProtection) {
+            if (!checkSavedPreferences("appUninstallationProtection")) {
                 return;
             }
 
@@ -128,7 +127,7 @@ function openBlockWindowForWebsites(){
 
 async function openDelaySettingDialogBox() {
     if(!mainWindow){
-
+        return;
     }
     mainWindow.backgroundColor = '#0047ab';
     mainWindow.webPreferences = {
@@ -279,16 +278,36 @@ function turnOffSetting(settingId){
     }
 }
 
-function flagAppWithOverlay(displayName, processName) {
-    if (!overlayWindow) {
-        createOverlayWindow();
-
-        overlayWindow.webContents.once('did-finish-load', () => {
-            overlayWindow.webContents.send('app-info', { displayName, processName });
-        });
+function canFlagNow(){
+    const blockData = readData("savedPreferences.json") || {};
+    const timerInfo = blockData.timerInfo || {};
+    const lastManualOverrideTimestamp = _.get(timerInfo, 'lastManualChangeTimestamp', undefined);
+    if(!lastManualOverrideTimestamp){
+        return true;
     }
-    else {
-        overlayWindow.webContents.send('app-info', { displayName, processName });
+    return Date.now() - lastManualOverrideTimestamp >= 30000;
+}
+
+function createOverlayAndPassInfo(appInfo){
+    createOverlayWindow();
+    overlayWindow.webContents.once('did-finish-load', () => {
+        overlayWindow?.webContents?.send('app-info', appInfo);
+    });
+}
+
+function flagAppWithOverlay(displayName, processName) {
+    const isManualOverrideAllowed = canAllowManualClosure();
+    const appInfo = { displayName, processName, isManualOverrideAllowed };
+
+    if (overlayWindow) {
+        overlayQueue.push(appInfo);
+    } else {
+        if(canFlagNow()){
+            createOverlayAndPassInfo(appInfo);
+        }
+        else{
+            setTimeout(() => createOverlayAndPassInfo(appInfo), 30000);
+        }
     }
 }
 
@@ -343,14 +362,74 @@ function createOverlayWindow() {
     overlayWindow.webContents.openDevTools();
 }
 
-ipcMain.on('close-app-and-overlay', (event, { displayName, processName }) => {
-    closeApp(processName, displayName).then(() => {
-        if (overlayWindow) {
-            overlayWindow.close();
-            overlayWindow = null;
+function canAllowManualClosure() {
+    const blockData = readData("savedPreferences.json");
+    const timerInfo = blockData?.timerInfo || {};
+    const lastManualChange = _.get(timerInfo, "lastManualChangeTimestamp", undefined);
+
+    if (!lastManualChange) {
+        return true;
+    }
+
+    const eightHours = 8 * 60 * 60 * 1000;
+    return (Date.now() - lastManualChange) >= eightHours;
+}
+
+function setLastManualChangeTimestamp(){
+    const filename = "savedPreferences.json";
+    const blockData = readData(filename);
+
+    _.set(blockData, "timerInfo.lastManualChangeTimestamp", Date.now());
+    writeData(blockData, filename);
+}
+
+function closeOverlayWindow() {
+    if (overlayWindow) {
+        overlayWindow.close();
+        overlayWindow = null;
+
+        if (overlayQueue.length > 0) {
+            const nextAppInfo = overlayQueue.shift();
+            flagAppWithOverlay(nextAppInfo.displayName, nextAppInfo.processName);
+        }
+    }
+}
+
+function checkIfAppIsStillOpenAndSetOverlayWindowIfOpen(displayName, processName) {
+    const baseName = processName.replace('.exe', '');
+
+    exec(`powershell -Command "Get-Process -Name '${baseName}' -ErrorAction SilentlyContinue"`, (err, stdout) => {
+        if (err) {
+            console.error(`Error checking process ${processName}:`, err);
+            return;
+        }
+
+        if (stdout && stdout.trim().length > 0) {
+            console.log(`⚠️ ${processName} is still open. Re-opening overlay...`);
+            if (!overlayWindow) {
+                flagAppWithOverlay(displayName, processName);
+            }
+        } else {
+            console.log(`✅ ${processName} has been closed manually.`);
+            closeOverlayWindow();
         }
     });
+}
+
+ipcMain.on('close-app-and-overlay', (event, { displayName, processName }) => {
+    closeApp(processName)
+        .then((result) => {
+            if(result){
+                closeOverlayWindow()
+            } else if(canAllowManualClosure()){
+                setLastManualChangeTimestamp();
+                closeOverlayWindow();
+                setTimeout(() => checkIfAppIsStillOpenAndSetOverlayWindowIfOpen(displayName, processName), 30000);
+            }
+        });
 });
+
+ipcMain.on('closeOverlay', () => closeOverlayWindow());
 
 ipcMain.on('close-delay-accountability-modal', () => closeDelayAccountabilityDialog());
 
@@ -364,6 +443,7 @@ ipcMain.on('set-dns', () => {
 ipcMain.on('show-dns-dialog', () => showDNSConfirmationWindow());
 
 ipcMain.on('enforce-safe-search', (event) => {
+
     enforceSafeSearch().then(() => {
         console.log("blah");
         savePreference("enforceSafeSearch", true);
@@ -419,6 +499,10 @@ ipcMain.on('show-delay-accountability-dialog', (event, id) => void showDelayAcco
 
 ipcMain.on('flagWithOverlay', (event, { displayName, processName }) => flagAppWithOverlay(displayName, processName));
 
+ipcMain.on('turnOnAppProtection', () => appBlockProtection());
+
+ipcMain.on('turnOnSettingsProtection', () => settingsProtectionOn());
+
 function closeDelayAccountabilityDialog(){
     if (delayAccountDialog && !delayAccountDialog.isDestroyed()) {
         delayAccountDialog.close();
@@ -473,10 +557,6 @@ async function showDelayAccountabilityDialogOrProgressDialog(settingId) {
     delayAccountDialog.webContents.openDevTools();
 }
 
-blockProtectionEmitter.on('flagAppWithOverlay', ({displayName, processName}) => {
-    flagAppWithOverlay(displayName, processName);
-});
-
 function readData(filename = 'savedPreferences.json') {
     const dataPath = getDataPath(filename);
 
@@ -500,6 +580,69 @@ function readData(filename = 'savedPreferences.json') {
     }
 }
 
+async function getInstalledAppInfo(){
+    const isUserApp = (app) => {
+        if(app.hasOwnProperty("InstallLocation") &&app.hasOwnProperty("DisplayName") && app.hasOwnProperty("UninstallString")){
+            const location = (app.InstallLocation ?? "").toLowerCase();
+            return app.DisplayName && !location.includes('windows') && app.UninstallString;
+        }
+        return false;
+    }
+
+    const findExeInInstallLocation = (installLocation) => {
+        if (!installLocation || !fs.existsSync(installLocation)) return null;
+
+        const files = fs.readdirSync(installLocation);
+        const exe = files.find(file => file.toLowerCase().endsWith('.exe'));
+        return exe || null;
+    }
+
+    const getMatchFromName = (str = "") => {
+        const match = str.match(/\\([^\\]+\.exe)/i);
+        return match ? match[1].toLowerCase() : null;
+    }
+
+    const tryExeFromIcon = (iconPath) => {
+        if (!iconPath || !iconPath.toLowerCase().endsWith('.ico')) return null;
+
+        const exePath = iconPath.replace(/\.ico$/i, '.exe');
+        if (fs.existsSync(exePath)) return path.basename(exePath);
+        return null;
+    }
+
+    const extractProcessName = (displayIcon, uninstallString, installLocation) => {
+        const matchFromDisplayIcon = getMatchFromName(displayIcon);
+        if(matchFromDisplayIcon){
+            return matchFromDisplayIcon;
+        }
+
+        const matchFromUnInstallString = getMatchFromName(uninstallString);
+        if(matchFromUnInstallString){
+            return matchFromUnInstallString;
+        }
+
+        const exeFromIconLocation = tryExeFromIcon(displayIcon);
+        if(exeFromIconLocation){
+            return exeFromIconLocation;
+        }
+
+        return findExeInInstallLocation(installLocation);
+    }
+
+    const apps = await getInstalledApps();
+
+    return apps
+        .filter(app => isUserApp(app))
+        .map(app => {
+            return {
+                displayName: (app.hasOwnProperty("DisplayName") && app.DisplayName) ? app.DisplayName : app.appName,
+                processName: extractProcessName(app['DisplayIcon'] , app['UninstallString'], app['InstallLocation']),
+                iconPath: app['DisplayIcon'],
+                installationPath: app['InstallLocation']
+            }
+        });
+}
+
 ipcMain.handle('getAllInstalledApps', async () => {
     const apps = await getInstalledAppInfo();
     if (!apps || apps.length === 0) {
@@ -517,8 +660,6 @@ ipcMain.handle('getAllInstalledApps', async () => {
     }
 });
 
-
-
 ipcMain.handle('getBlockData', async () => readData('blockData.json'));
 
 ipcMain.handle('getPreferences', async () => readData('savedPreferences.json'));
@@ -526,6 +667,8 @@ ipcMain.handle('getPreferences', async () => readData('savedPreferences.json'));
 ipcMain.on('saveData', (event, args) => {
     writeData(args.data, args.fileName);
 });
+
+ipcMain.on('isSafeSearchEnforced', async () => isSafeSearchEnforced());
 
 function writeData(data, filename) {
     const dataPath = getDataPath(filename);
@@ -728,5 +871,304 @@ async function isSafeDNS(interfaceName) {
     } catch (err) {
         console.error('Failed to read DNS settings:', err);
         return [];
+    }
+}
+
+const processCache = {
+    data: new Map(),
+    lastUpdate: 0,
+    cacheTimeout: 3000
+};
+
+const getAllProcessInfo = () => {
+    return new Promise((resolve) => {
+        const now = Date.now();
+
+        if (now - processCache.lastUpdate < processCache.cacheTimeout) {
+            return resolve(processCache.data);
+        }
+
+        const psCommand = `
+            $processes = Get-Process | Where-Object { 
+                $_.ProcessName -or $_.MainWindowTitle 
+            } | Select-Object ProcessName, MainWindowTitle, Id;
+            
+            $result = @{
+                processes = $processes;
+                controlPanel = ($processes | Where-Object { $_.MainWindowTitle -match 'Control Panel' }).Count -gt 0;
+                notepadHosts = ($processes | Where-Object { 
+                    $_.ProcessName -eq 'notepad' -and $_.MainWindowTitle -like '*hosts*' 
+                }).Count -gt 0
+            };
+            
+            $result | ConvertTo-Json -Depth 3
+        `;
+
+        exec(`powershell -Command "${psCommand.replace(/\s+/g, ' ')}"`, (err, stdout) => {
+            if (err) {
+                console.error('Process query error:', err);
+                return resolve(processCache.data);
+            }
+
+            try {
+                const result = JSON.parse(stdout);
+                const processMap = new Map();
+
+                const processes = result['processes'];
+                if (processes) {
+                    processes.forEach(proc => {
+                        const key = proc["ProcessName"]?.toLowerCase();
+                        if (key) {
+                            processMap.set(key, {
+                                processName: proc["ProcessName"],
+                                windowTitle: proc['MainWindowTitle'] || '',
+                                id: proc['Id']
+                            });
+                        }
+                    });
+                }
+
+                processMap.set('_meta', {
+                    controlPanelOpen: result['controlPanel'],
+                    notepadHostsOpen: result['notepadHosts']
+                });
+
+                processCache.data = processMap;
+                processCache.lastUpdate = now;
+                resolve(processMap);
+            } catch (parseErr) {
+                console.error('Parse error:', parseErr);
+                resolve(processCache.data);
+            }
+        });
+    });
+};
+
+function appBlockProtection() {
+    let monitoringInterval = null;
+    const activeOverlays = new Set();
+
+    const getBlockedAppsList = () => {
+        const blockData = readData('blockData.json');
+        const blockedLists = blockData ? blockData.blockedApps : [];
+        return blockedLists || [];
+    };
+
+    const checkBlockedApps = async () => {
+        const processMap = await getAllProcessInfo();
+        const blockedApps = getBlockedAppsList();
+
+        blockedApps.forEach(app => {
+            const processNameBase = app.processName.replace('.exe', '').toLowerCase();
+            const displayName = app.displayName;
+            const processInfo = processMap.get(processNameBase);
+
+            let isRunning = false;
+
+            if (processInfo) {
+                isRunning = true;
+            } else {
+                for (const [key, proc] of processMap) {
+                    if (key !== '_meta' && proc.windowTitle &&
+                        proc.windowTitle.toLowerCase().includes(displayName.toLowerCase())) {
+                        isRunning = true;
+                        break;
+                    }
+                }
+            }
+
+            if (isRunning) {
+                if (!activeOverlays.has(app.processName)) {
+                    console.log(`⚠️ Blocked app ${displayName} is running.`);
+                    flagAppWithOverlay(displayName, app.processName);
+                    activeOverlays.add(app.processName);
+                }
+            } else {
+                activeOverlays.delete(app.processName);
+            }
+        });
+    };
+
+    const monitorBlockedApps = () => {
+        if (monitoringInterval) return;
+
+        monitoringInterval = setInterval(async () => {
+            const isAppBlockingEnabled = checkSavedPreferences("overlayRestrictedContent");
+
+
+            if (!isAppBlockingEnabled) {
+                clearInterval(monitoringInterval);
+                monitoringInterval = null;
+                activeOverlays.clear();
+                return;
+            }
+
+            await checkBlockedApps();
+        }, 8000);
+    };
+
+    const mainCall = async () => {
+        const isAppBlockingEnabled = checkSavedPreferences("overlayRestrictedContent");
+        if (isAppBlockingEnabled) {
+            await checkBlockedApps();
+            monitorBlockedApps();
+        }
+    };
+
+    void mainCall();
+}
+
+function closeApp(processName) {
+    const baseName = processName.replace('.exe', '');
+
+    const closeCmd = `
+        $proc = Get-Process -Name '${baseName}' -ErrorAction SilentlyContinue;
+        if ($proc) {
+            $sig = '[DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);';
+            $type = Add-Type -MemberDefinition $sig -Name NativeMethods -Namespace Win32 -PassThru;
+            $proc | ForEach-Object { $type::PostMessage($_.MainWindowHandle, 0x0010, 0, 0) };
+            Start-Sleep -Seconds 2;
+            $stillRunning = Get-Process -Name '${baseName}' -ErrorAction SilentlyContinue;
+            if ($stillRunning) {
+                Stop-Process -Name '${baseName}' -Force -ErrorAction SilentlyContinue;
+            }
+        }
+    `.replace(/\s+/g, ' ');
+
+    return new Promise((resolve) => {
+        let finished = false;
+
+        exec(`powershell -Command "${closeCmd}"`, (err) => {
+            if (err) {
+                console.error(`❌ Failed to issue close for ${processName}:`, err);
+            } else {
+                console.log(`✅ Close attempt issued for ${processName}`);
+            }
+        });
+
+        const start = Date.now();
+        const interval = setInterval(() => {
+            exec(`powershell -Command "Get-Process -Name '${baseName}' -ErrorAction SilentlyContinue"`, (checkErr, stdout) => {
+                if (finished) return;
+
+                if (!stdout || stdout.trim().length === 0) {
+                    finished = true;
+                    clearInterval(interval);
+                    console.log(`🎉 ${processName} successfully closed`);
+                    return resolve(true);
+                }
+
+                if (Date.now() - start >= 60000) {
+                    finished = true;
+                    clearInterval(interval);
+                    console.warn(`⚠️ ${processName} is still running after 60s`);
+                    return resolve(false);
+                }
+            });
+        }, 5000);
+    });
+}
+
+function monitorApp(command) {
+    return new Promise((resolve) => {
+        exec(command, (err, stdout) => {
+            if (!err && stdout.trim().length > 0) {
+                return resolve(true);
+            }
+            return resolve(false);
+        });
+    });
+}
+
+function settingsProtectionOn() {
+    const monitorSettings = async () => {
+        try {
+            const hostMonitoringCommand = `powershell -Command "Get-Process notepad -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -match 'hosts' }"`;
+            const isHostsFileFlagged = await monitorApp(hostMonitoringCommand);
+
+            if(isHostsFileFlagged){
+                flagAppWithOverlay("Notepad (hosts file)", "notepad.exe");
+                return false;
+            }
+
+            const controlPanelMonitorCommand =  `powershell -Command "Get-Process | Where-Object { $_.MainWindowTitle -match 'Control Panel' }"`;
+
+            const isControlPanelOpen = await monitorApp(controlPanelMonitorCommand);
+            if(isControlPanelOpen){
+                flagAppWithOverlay("Control Panel", "control.exe");
+                return false;
+            }
+
+        } catch (e) {
+            console.error("Error monitoring settings:", e);
+        }
+    };
+
+    if (checkSavedPreferences("blockSettingsSwitch")) {
+        const settingsInterval = setInterval(monitorSettings, 12000);
+
+        void monitorSettings();
+        appBlockProtection();
+
+        return settingsInterval;
+    }
+}
+
+async function enforceSafeSearch() {
+    const entries = [
+        '216.239.38.120 www.google.com',
+        '216.239.38.120 google.com',
+        '204.79.197.220 bing.com',
+        '204.79.197.220 www.bing.com',
+        '213.180.193.56 yandex.ru',
+        '213.180.204.92 www.yandex.com',
+        '127.0.0.1 yandex.com/images'
+    ];
+
+    const lines = entries.map(e => e.trim());
+
+    const script = `
+        const fs = require('fs');
+        const os = require('os');
+        const path = "${HOSTS_PATH.replace(/\\/g, '\\\\')}";
+        const lines = ${JSON.stringify(lines)};
+        let content = fs.readFileSync(path, 'utf8');
+        lines.forEach(line => {
+            if (!content.includes(line)) content += os.EOL + line;
+        });
+        fs.writeFileSync(path, content, 'utf8');
+        console.log("✅ Added lines: " + lines.join(', '));
+    `.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n\s+/g, ' ');
+
+    return new Promise((resolve) => {
+        sudoPrompt.exec(`node -e "${script}"`, { name: 'Website Blocker' }, (error, stdout, stderr) => {
+            if (error) {
+                console.error("❌ Failed to write to hosts file:", error.message || stderr);
+                resolve(false);
+                return;
+            }
+            console.log(stdout.trim());
+            resolve(true);
+        });
+    });
+}
+
+function isSafeSearchEnforced() {
+    const requiredEntries = [
+        '216.239.38.120 www.google.com',
+        '216.239.38.120 google.com',
+        '204.79.197.220 bing.com',
+        '204.79.197.220 www.bing.com',
+        '213.180.193.56 yandex.ru',
+        '213.180.204.92 www.yandex.com',
+        '127.0.0.1 yandex.com/images'
+    ];
+
+    try {
+        const content = fs.readFileSync(HOSTS_PATH, 'utf8');
+        return requiredEntries.every(entry => content.includes(entry));
+    } catch (err) {
+        console.error('❌ Error reading hosts file:', err.message);
+        return false;
     }
 }

@@ -4,7 +4,7 @@
   "allowedForUnblockWebsites": false,
   "allowedForUnblockApps": false,
   "overlayRestrictedContent": true,
-  "enableProtectiveDNS": true,
+  "enableProtectiveDNS": false,
   "blockSettingsSwitch": true,
   "appUninstallationProtection": true,
   "enforceSafeSearch": true,
@@ -15,6 +15,7 @@
       "remainingTime": 5851,
       "startTimeStamp": 1756702142506,
       "targetTimeout": null
-    }
+    },
+    "lastManualChangeTimestamp": 1757296961346
   }
 }

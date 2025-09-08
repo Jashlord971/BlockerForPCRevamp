@@ -1,6 +1,4 @@
 const {ipcRenderer} = require("electron");
-const {isSafeSearchEnforced} = require("./safeSearchEnforcer");
-const {appBlockProtection, settingsProtectionOn} = require("./blockProtection");
 
 const setChecked = (id, value) => {
     const element = document.getElementById(id);
@@ -50,9 +48,17 @@ function initializeOverlaySettingSwitch() {
     });
 }
 
+function turnOnAppProtection(){
+    ipcRenderer.send('turnOnAppProtection');
+}
+
+function turnOnSettingsProtection(){
+    ipcRenderer.send('turnOnSettingsProtection');
+}
+
 function turnOnSettings(){
-    appBlockProtection();
-    settingsProtectionOn();
+    turnOnAppProtection();
+    turnOnSettingsProtection();
 }
 
 const checkDnsSafety = async () => await ipcRenderer.invoke('check-dns-safety');
@@ -107,8 +113,9 @@ function initializeSafeSearchSwitch() {
 
     safeSearchSwitch.addEventListener("change", async () => {
         const savedValue = await checkSavedPreferences(id);
+        const isSafeSearchEnforcedValue = await isSafeSearchEnforced();
 
-        if (isSafeSearchEnforced() && !savedValue) {
+        if (isSafeSearchEnforcedValue && !savedValue) {
             safeSearchSwitch.checked = true;
             void savePreference(id, true);
             return;
@@ -182,6 +189,10 @@ window.addEventListener('DOMContentLoaded', () => init());
 async function checkSavedPreferences(id){
     const preferences = await ipcRenderer.invoke('getPreferences');
     return preferences && !!preferences[id];
+}
+
+async function isSafeSearchEnforced(){
+    return await ipcRenderer.invoke('isSafeSearchEnforced');
 }
 
 async function savePreference(id, value){
