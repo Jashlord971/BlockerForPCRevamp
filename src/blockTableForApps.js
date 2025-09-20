@@ -1,10 +1,14 @@
 const { ipcRenderer } = require('electron');
 const filename = 'blockData.json';
+const _ = require('lodash');
 
 ipcRenderer.on('renderLatestTable', () => renderTable());
 
-async function renderTable() {
-    const list = await getBlockedAppsList();
+let blockedApps;
+let allInstalledApps;
+
+function processBlockedAppsAndRenderTable(list){
+    blockedApps = Object.assign(blockedApps, list);
     const tbody = document.querySelector('#data-table tbody');
     tbody.innerHTML = '';
 
@@ -28,6 +32,17 @@ async function renderTable() {
     });
 }
 
+async function renderTable(list = null) {
+    if(list){
+        return processBlockedAppsAndRenderTable(list);
+    }
+    return getBlockedAppsList()
+        .then(list => {
+            blockedApps = list;
+            processBlockedAppsAndRenderTable(blockedApps);
+        });
+}
+
 function getDeleteButton(text = 'Delete') {
     const button = document.createElement('button');
     button.textContent = text;
@@ -41,17 +56,20 @@ function getDeleteButton(text = 'Delete') {
 }
 
 async function removeItemAtIndex (index){
-    const list = await getBlockedAppsList();
-    if(list.length  !== 0){
-        list.splice(index, 1);
-        return saveBlockedAppsList(list)
-            .then(() => {
-                console.log("Deletion of object at index: " + index + " was successful");
-                renderTable();
-            })
-            .catch(error => console.log(error));
-    }
-    return Promise.resolve(undefined);
+    return getBlockedAppsList()
+        .then(list => {
+            if(!list || list.length === 0){
+                return;
+            }
+            list.splice(index, 1);
+            return saveBlockedAppsList(list)
+                .then(() => {
+                    console.log("Deletion of object at index: " + index + " was successful");
+                    renderTable(list);
+                })
+                .catch(error => console.log(error));
+        })
+        .catch(() => undefined);
 }
 
 window.removeItem = async function(index) {
@@ -74,10 +92,14 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     void renderTable();
 
-    addBtn.addEventListener('click', async () => {
-        const list = await getBlockedAppsList();
-        const blockedProcessNames = new Set(list.map(app => app.processName));
-        const allInstalledApps = await getAllInstalledApps();
+    getAllInstalledApps()
+        .then(installedApps => allInstalledApps = installedApps);
+
+    getBlockedAppsList()
+        .then(givenBlockedApps => blockedApps = givenBlockedApps);
+
+    addBtn.addEventListener('click', () => {
+        const blockedProcessNames = new Set(blockedApps.map(app => app.processName));
         const apps = allInstalledApps.filter(app => !blockedProcessNames.has(app.processName));
         renderAppSearchModal(apps);
     });
@@ -86,21 +108,26 @@ window.addEventListener('DOMContentLoaded', async () => {
         modal.style.display = 'none';
     });
 
-    saveBtn.addEventListener('click', async() => {
+    saveBtn.addEventListener('click', () => {
         const attribute = 'value';
         const value = (input[attribute]).trim();
-        if (value){
-            const blockData = await ipcRenderer.invoke('getBlockData');
-            const list = blockData.blockedApps;
-            list.push(value);
-            blockData.blockedApps = list;
-            ipcRenderer.send('saveData', {
-                data: blockData,
-                fileName: filename
-            });
-            void renderTable();
-            modal.style.display = 'none';
+
+        if(!value){
+            return;
         }
+
+        return ipcRenderer.invoke('getBlockData')
+            .then(blockData => {
+                const list = blockData.blockedApps;
+                list.push(value);
+                blockData.blockedApps = list;
+                ipcRenderer.send('saveData', {
+                    data: blockData,
+                    fileName: filename
+                });
+                return renderTable();
+            })
+            .then(() => modal.style.display = 'none');
     });
 });
 

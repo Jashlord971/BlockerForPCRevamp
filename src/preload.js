@@ -9,5 +9,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
         send: (channel, data) => ipcRenderer.send(channel, data),
         on: (channel, func) => ipcRenderer.on(channel, (event, ...args) => func(...args)),
     },
-    closeOverlay: () => ipcRenderer.send('closeOverlay')
+    closeOverlay: () => ipcRenderer.send('closeOverlay'),
+    closeTaskManager:() => ipcRenderer.send('closeTaskManager')
 });

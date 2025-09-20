@@ -5,16 +5,21 @@ const util = require('util');
 const execPromise = util.promisify(exec);
 const {getInstalledApps}  = require("get-installed-apps");
 const fs = require("fs");
+const fsp = require("fs").promises;
 const sudoPrompt = require("sudo-prompt");
 const _ = require("lodash");
+const AutoLaunch = require('auto-launch');
 
 let mainWindow = null;
-const activeTimers = new Map();
+let activeTimers = new Map();
 let overlayWindow = null;
 let dnsConfirmationModal = null;
 let delayAccountDialog = null;
 let flag = false;
 let overlayQueue = [];
+
+const gotTheLock = app.requestSingleInstanceLock();
+const basePath = !app.isPackaged ? path.join(__dirname, 'data') : path.join(app.getPath('userData'), 'data');
 
 const HOSTS_PATH = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
 
@@ -23,18 +28,13 @@ function getAssetPath(fileName) {
 }
 
 function getHtmlPath(fileName) {
-    console.log(__dirname);
     return path.join(__dirname, fileName);
 }
 
 function getDataPath(fileName) {
-    const isDev = !app.isPackaged;
-    const basePath = isDev ? path.join(__dirname, 'data') : path.join(app.getPath('userData'), 'data');
-
     if (!fs.existsSync(basePath)) {
         fs.mkdirSync(basePath, { recursive: true });
     }
-
     return path.join(basePath, fileName);
 }
 
@@ -49,8 +49,6 @@ function createWindow() {
         }
     });
 
-    mainWindow.webContents.openDevTools();
-
     mainWindow.loadFile(getHtmlPath('mainConfig.html')).then(() => {
         const customMenu = Menu.buildFromTemplate(getMenuTemplate());
         Menu.setApplicationMenu(customMenu);
@@ -61,29 +59,32 @@ function createWindow() {
     }
 }
 
-function checkSavedPreferences(id){
+async function checkSavedPreferences(id){
     const filename = 'savedPreferences.json';
-    const data = readData(filename);
+    const data = await readData(filename);
     return data && data[id];
 }
 
 function makeWindowNotClosable(window){
     if(window){
         window.on('close', (e) => {
-            if (!checkSavedPreferences("appUninstallationProtection")) {
-                return;
-            }
+            checkSavedPreferences("appUninstallationProtection")
+                .then(isAppUninstallationProtectionEnabled => {
+                    if(!isAppUninstallationProtectionEnabled){
+                        return;
+                    }
 
-            e.preventDefault();
+                    e.preventDefault();
 
-            dialog.showMessageBoxSync(window, {
-                type: 'warning',
-                buttons: ['OK'],
-                defaultId: 0,
-                title: 'Protected Window',
-                message: 'Protection is Enabled',
-                detail: 'You cannot close this window while app protection is active.'
-            });
+                    dialog.showMessageBoxSync(window, {
+                        type: 'warning',
+                        buttons: ['OK'],
+                        defaultId: 0,
+                        title: 'Protected Window',
+                        message: 'Protection is Enabled',
+                        detail: 'You cannot close this window while app protection is active.'
+                    });
+                });
         });
     }
 }
@@ -120,8 +121,6 @@ function openBlockWindowForWebsites(){
         nodeIntegration: false,
         preload: 'src/preload.js'
     }
-
-    mainWindow.webContents.openDevTools();
     void mainWindow.loadFile(getHtmlPath('blockTableForWebsites.html'));
 }
 
@@ -137,7 +136,6 @@ async function openDelaySettingDialogBox() {
     };
 
     await mainWindow.loadFile(getHtmlPath('delaySettingModal.html'));
-    mainWindow.webContents.openDevTools();
 }
 
 async function openBlockWindowForApps(){
@@ -160,9 +158,8 @@ async function openMainConfig(){
     };
 
     mainWindow.webContents.once('did-finish-load', () => {
-        mainWindow.webContents.openDevTools();
-        const delayStatus = getDelayChangeStatus();
-        mainWindow.webContents.send('delayTimeout', delayStatus);
+        getDelayChangeStatus()
+            .then(delayStatus =>  mainWindow.webContents.send('delayTimeout', delayStatus));
     });
 
     await mainWindow.loadFile(getHtmlPath('mainConfig.html')).then(() => {
@@ -171,9 +168,9 @@ async function openMainConfig(){
     });
 }
 
-const getDelayTimeOut = () => {
+const getDelayTimeOut = async () => {
     const filename = 'savedPreferences.json';
-    const preferences = readData(filename);
+    const preferences = await readData(filename);
     const value = preferences.delayTimeout;
     if(!value){
         return 3*60*1000;
@@ -183,26 +180,31 @@ const getDelayTimeOut = () => {
 
 function getDelayChangeStatus() {
     const delayTimeoutId = "delayTimeout";
-    const currentTimeout = getDelayTimeOut();
+    return getDelayTimeOut()
+        .then(currentTimeout => {
+            const timerInfo = activeTimers.get(delayTimeoutId);
+            if (timerInfo) {
+                const now = Date.now();
+                const timeRemaining = Math.max(timerInfo.endTime - now, 0);
+                const attribute = "newDelayValue";
 
-    const timerInfo = activeTimers.get(delayTimeoutId);
-    if (timerInfo) {
-        const now = Date.now();
-        const timeRemaining = Math.max(timerInfo.endTime - now, 0);
-        const attribute = "newDelayValue";
+                return {
+                    currentTimeout,
+                    isChanging: true,
+                    timeRemaining,
+                    newValue: timerInfo[attribute]
+                };
+            }
 
-        return {
-            currentTimeout,
-            isChanging: true,
-            timeRemaining,
-            newValue: timerInfo[attribute]
-        };
-    }
-
-    return {
-        currentTimeout,
-        isChanging: false
-    };
+            return {
+                currentTimeout,
+                isChanging: false
+            };
+        })
+        .catch(error => {
+            console.log("Encountered an error while getting the delayChangeStatus");
+            console.log(error);
+        });
 }
 
 
@@ -221,31 +223,98 @@ function refreshMainConfig(){
 
 function savePreference(id, value){
     const filename = 'savedPreferences.json';
-    const preferences = readData(filename);
-    preferences[id] = value;
-    writeData(preferences, filename);
+    return readData(filename)
+        .then(preferences => {
+            preferences[id] = value;
+            return writeData(preferences, filename)
+                .then(() => console.log("successfully updated preferences"))
+                .catch(error => console.log(error));
+        })
+        .catch(error => {
+            console.log("Encountered error when saving preferences");
+            console.log(error);
+        });
+}
+
+function autoLaunchApp(){
+    const autoLaunch = new AutoLaunch({
+        name: 'EagleBlocker',
+        path: app.getPath('exe'),
+    });
+
+    autoLaunch.isEnabled().then((isEnabled) => {
+        if (!isEnabled) autoLaunch.enable();
+    });
+}
+
+function isTaskManagerOpen(callback) {
+    exec('tasklist /FI "IMAGENAME eq Taskmgr.exe"', (err, stdout) => {
+        if (err) {
+            console.error("❌ Failed to check Task Manager:", err);
+            return callback(false);
+        }
+
+        console.log(stdout);
+        const isRunning = stdout.toLowerCase().includes("taskmgr.exe");
+        callback(isRunning);
+    });
 }
 
 app.whenReady().then(async () => {
-    if(!isSafeSearchEnforced()){
-        savePreference("enforceSafeSearch", false);
+    if(!gotTheLock){
+        app.quit();
+        return false;
     }
+
+    isSafeSearchEnforced()
+        .then(isSafeSearchEnforcedLocally => {
+            if(!isSafeSearchEnforcedLocally){
+                savePreference("enforceSafeSearch", false);
+            }
+        })
+        .catch(error => {
+            console.log("Encountered error while checking if we have enforced safe search locally");
+            console.log(error);
+        });
 
     createWindow();
 
     setTimeout(async () => {
         const value = await isDnsMadeSafe();
         if(!value){
-            savePreference("enableProtectiveDNS", false);
-            refreshMainConfig();
+            savePreference("enableProtectiveDNS", false)
+                .then(() => refreshMainConfig())
+                .catch(error => console.log(error));
         }
-        reactivateTimers();
     }, 4000);
 
     //installMyService();
     settingsProtectionOn();
     appBlockProtection();
+
+    autoLaunchApp();
+
+    void createEagleTaskScheduleSimple();
+    void reactivateTimers(activeTimers);
 });
+
+function createEagleTaskScheduleSimple() {
+    return new Promise((resolve, reject) => {
+        const taskName = "Eagle Task Schedule";
+        const appPath = "C:\\Program Files\\Eagle Blocker\\Eagle Blocker.exe";
+        const command = `schtasks /create /f /sc minute /mo 5 /tn "${taskName}" /tr "\\"${appPath}\\""`;
+
+        exec(command, (error, stdout, stderr) => {
+            if (error) {
+                console.error("Error creating scheduled task:", stderr || error.message);
+                reject(error);
+                return;
+            }
+            console.log("Eagle Task Schedule created successfully:", stdout);
+            resolve(stdout);
+        });
+    });
+}
 
 const closeDNSConfirmationWindow = () => {
     if (dnsConfirmationModal && !dnsConfirmationModal.isDestroyed()) {
@@ -278,8 +347,8 @@ function turnOffSetting(settingId){
     }
 }
 
-function canFlagNow(){
-    const blockData = readData("savedPreferences.json") || {};
+async function canFlagNow(){
+    const blockData = await readData("savedPreferences.json") || {};
     const timerInfo = blockData.timerInfo || {};
     const lastManualOverrideTimestamp = _.get(timerInfo, 'lastManualChangeTimestamp', undefined);
     if(!lastManualOverrideTimestamp){
@@ -291,18 +360,25 @@ function canFlagNow(){
 function createOverlayAndPassInfo(appInfo){
     createOverlayWindow();
     overlayWindow.webContents.once('did-finish-load', () => {
-        overlayWindow?.webContents?.send('app-info', appInfo);
+        const serializableAppInfo = {
+            displayName: appInfo.displayName || '',
+            processName: appInfo.processName || '',
+            isManualOverrideAllowed: appInfo.isManualOverrideAllowed || false
+        };
+        overlayWindow?.webContents?.send('app-info', serializableAppInfo);
     });
 }
 
-function flagAppWithOverlay(displayName, processName) {
-    const isManualOverrideAllowed = canAllowManualClosure();
+async function flagAppWithOverlay(displayName, processName) {
+    const isManualOverrideAllowed = await canAllowManualClosure();
     const appInfo = { displayName, processName, isManualOverrideAllowed };
 
     if (overlayWindow) {
         overlayQueue.push(appInfo);
     } else {
-        if(canFlagNow()){
+        const canWeFlagNow = await canFlagNow();
+        if(canWeFlagNow){
+            console.log(appInfo);
             createOverlayAndPassInfo(appInfo);
         }
         else{
@@ -334,7 +410,6 @@ function showDNSConfirmationWindow() {
     void dnsConfirmationModal.loadFile(getHtmlPath('dnsConfirmationModal.html'));
     dnsConfirmationModal.once('ready-to-show', () => dnsConfirmationModal.show());
     dnsConfirmationModal.setMenu(null);
-    dnsConfirmationModal.webContents.openDevTools();
 }
 
 function createOverlayWindow() {
@@ -358,12 +433,10 @@ function createOverlayWindow() {
     overlayWindow.on('closed', () => {
         overlayWindow = null;
     });
-
-    overlayWindow.webContents.openDevTools();
 }
 
-function canAllowManualClosure() {
-    const blockData = readData("savedPreferences.json");
+async function canAllowManualClosure() {
+    const blockData = await readData("savedPreferences.json");
     const timerInfo = blockData?.timerInfo || {};
     const lastManualChange = _.get(timerInfo, "lastManualChangeTimestamp", undefined);
 
@@ -375,12 +448,14 @@ function canAllowManualClosure() {
     return (Date.now() - lastManualChange) >= eightHours;
 }
 
-function setLastManualChangeTimestamp(){
+async function setLastManualChangeTimestamp(){
     const filename = "savedPreferences.json";
-    const blockData = readData(filename);
-
-    _.set(blockData, "timerInfo.lastManualChangeTimestamp", Date.now());
-    writeData(blockData, filename);
+    readData(filename)
+        .then(blockData => {
+            _.set(blockData, "timerInfo.lastManualChangeTimestamp", Date.now());
+            writeData(blockData, filename);
+        })
+        .catch(() => console.log("Encountered error while setting the last manual change timestamp"));
 }
 
 function closeOverlayWindow() {
@@ -390,7 +465,7 @@ function closeOverlayWindow() {
 
         if (overlayQueue.length > 0) {
             const nextAppInfo = overlayQueue.shift();
-            flagAppWithOverlay(nextAppInfo.displayName, nextAppInfo.processName);
+            void flagAppWithOverlay(nextAppInfo.displayName, nextAppInfo.processName);
         }
     }
 }
@@ -407,7 +482,7 @@ function checkIfAppIsStillOpenAndSetOverlayWindowIfOpen(displayName, processName
         if (stdout && stdout.trim().length > 0) {
             console.log(`⚠️ ${processName} is still open. Re-opening overlay...`);
             if (!overlayWindow) {
-                flagAppWithOverlay(displayName, processName);
+                void flagAppWithOverlay(displayName, processName);
             }
         } else {
             console.log(`✅ ${processName} has been closed manually.`);
@@ -418,13 +493,20 @@ function checkIfAppIsStillOpenAndSetOverlayWindowIfOpen(displayName, processName
 
 ipcMain.on('close-app-and-overlay', (event, { displayName, processName }) => {
     closeApp(processName)
-        .then((result) => {
+        .then(async (result) => {
             if(result){
-                closeOverlayWindow()
-            } else if(canAllowManualClosure()){
-                setLastManualChangeTimestamp();
                 closeOverlayWindow();
-                setTimeout(() => checkIfAppIsStillOpenAndSetOverlayWindowIfOpen(displayName, processName), 30000);
+                return;
+            }
+
+            const canAllowManualCloseNow = await canAllowManualClosure();
+            if(canAllowManualCloseNow){
+                setLastManualChangeTimestamp()
+                    .then(() => {
+                        closeOverlayWindow();
+                        setTimeout(() => checkIfAppIsStillOpenAndSetOverlayWindowIfOpen(displayName, processName), 30000);
+                    })
+                    .catch(error => console.log(error));
             }
         });
 });
@@ -443,35 +525,34 @@ ipcMain.on('set-dns', () => {
 ipcMain.on('show-dns-dialog', () => showDNSConfirmationWindow());
 
 ipcMain.on('enforce-safe-search', (event) => {
-
-    enforceSafeSearch().then(() => {
-        console.log("blah");
-        savePreference("enforceSafeSearch", true);
-        event.sender.send('refreshMainConfig');
-    });
+    enforceSafeSearch()
+        .then(() => savePreference('enforceSafeSearch', true))
+        .then(() => event.sender.send('refreshMainConfig'))
+        .catch(error => console.log(error));
 });
 
 ipcMain.on('set-delay-timeout', (event, delayValue) => {
     const filename = 'savedPreferences.json';
-    const preferences = readData(filename);
-    preferences.delayTimeout = delayValue;
-    writeData(preferences, filename);
+    readData(filename).then(preferences => {
+        preferences.delayTimeout = delayValue;
+        void writeData(preferences, filename);
+    });
 });
 
 ipcMain.on('start-delay-timeout-change', (event, newDelayValue) => {
-    startCountdownTimer(activeTimers, "delayTimeout", getDelayTimeOut(), newDelayValue);
-    event.sender.send('sendTimeRemaining');
+    startCountdownTimer(activeTimers, "delayTimeout", getDelayTimeOut(), newDelayValue)
+        .then(() => event.sender.send('sendTimeRemaining'));
 });
 
 ipcMain.on('prime-block-for-deletion', (event, id) => {
-    startCountdownTimer(activeTimers, id, getDelayTimeOut(), null);
+    void startCountdownTimer(activeTimers, id, getDelayTimeOut(), null);
 });
 
 ipcMain.on('renderTableCall', (event) => {
     event.sender.send('renderLatestTable');
 });
 
-ipcMain.handle('getDelayChangeStatus', () => getDelayChangeStatus());
+ipcMain.handle('getDelayChangeStatus', async () => getDelayChangeStatus());
 
 ipcMain.on('close-both', () => {
     killControlPanel();
@@ -497,11 +578,17 @@ ipcMain.on('cancel-delay-change', (event, {settingId}) => {
 
 ipcMain.on('show-delay-accountability-dialog', (event, id) => void showDelayAccountabilityDialogOrProgressDialog(id));
 
-ipcMain.on('flagWithOverlay', (event, { displayName, processName }) => flagAppWithOverlay(displayName, processName));
+ipcMain.on('flagWithOverlay', async (event, { displayName, processName }) => void flagAppWithOverlay(displayName, processName));
 
 ipcMain.on('turnOnAppProtection', () => appBlockProtection());
 
 ipcMain.on('turnOnSettingsProtection', () => settingsProtectionOn());
+
+ipcMain.on('closeTaskManager', () => {
+    closeTaskManager()
+        .then(() => closeOverlayWindow())
+        .catch(() => console.log("Unable to kill task manager"))
+});
 
 function closeDelayAccountabilityDialog(){
     if (delayAccountDialog && !delayAccountDialog.isDestroyed()) {
@@ -553,27 +640,28 @@ async function showDelayAccountabilityDialogOrProgressDialog(settingId) {
     });
 
     delayAccountDialog.setMenu(null);
-
-    delayAccountDialog.webContents.openDevTools();
 }
 
-function readData(filename = 'savedPreferences.json') {
-    const dataPath = getDataPath(filename);
-
-    const defaultBlockData =  {
+async function readData(filename = "savedPreferences.json") {
+    const defaultBlockData = {
         blockedApps: [],
         blockedWebsites: [],
         allowedForUnblockWebsites: [],
-        allowedForUnblockApps: []
-    }
+        allowedForUnblockApps: [],
+    };
 
-    if (!fs.existsSync(dataPath)){
+    const dataPath = getDataPath(filename);
+
+    try {
+        await fsp.access(dataPath);
+    } catch {
         return defaultBlockData;
     }
 
     try {
-        const raw = fs.readFileSync(dataPath, 'utf-8');
-        return JSON.parse(raw);
+        const raw = await fsp.readFile(dataPath, "utf8");
+        const jsonString = Buffer.isBuffer(raw) ? raw.toString("utf8") : raw;
+        return JSON.parse(jsonString);
     } catch (err) {
         console.error(`[readData] Failed to read or parse data from ${dataPath}:`, err);
         return defaultBlockData;
@@ -589,12 +677,19 @@ async function getInstalledAppInfo(){
         return false;
     }
 
-    const findExeInInstallLocation = (installLocation) => {
-        if (!installLocation || !fs.existsSync(installLocation)) return null;
-
-        const files = fs.readdirSync(installLocation);
-        const exe = files.find(file => file.toLowerCase().endsWith('.exe'));
-        return exe || null;
+    const findExeInInstallLocation = async (installLocation) => {
+        if (!installLocation) {
+            return null;
+        }
+        return fsp.access(installLocation)
+            .then(() => fsp.readdir(installLocation))
+            .then(files => {
+                if(_.isEmpty(files) || !_.isArray(files)){
+                    return null;
+                }
+                return files.find(file => file && file.toLowerCase().endsWith('.exe'));
+            })
+            .catch(() => null);
     }
 
     const getMatchFromName = (str = "") => {
@@ -602,15 +697,18 @@ async function getInstalledAppInfo(){
         return match ? match[1].toLowerCase() : null;
     }
 
-    const tryExeFromIcon = (iconPath) => {
-        if (!iconPath || !iconPath.toLowerCase().endsWith('.ico')) return null;
+    const tryExeFromIcon = async (iconPath) => {
+        if (!iconPath || !iconPath.toLowerCase().endsWith('.ico')) {
+            return null;
+        }
 
         const exePath = iconPath.replace(/\.ico$/i, '.exe');
-        if (fs.existsSync(exePath)) return path.basename(exePath);
-        return null;
+        return fsp.access(exePath)
+            .then(() => path.basename(exePath))
+            .catch(() => null);
     }
 
-    const extractProcessName = (displayIcon, uninstallString, installLocation) => {
+    const extractProcessName = async (displayIcon, uninstallString, installLocation) => {
         const matchFromDisplayIcon = getMatchFromName(displayIcon);
         if(matchFromDisplayIcon){
             return matchFromDisplayIcon;
@@ -621,26 +719,30 @@ async function getInstalledAppInfo(){
             return matchFromUnInstallString;
         }
 
-        const exeFromIconLocation = tryExeFromIcon(displayIcon);
-        if(exeFromIconLocation){
-            return exeFromIconLocation;
-        }
-
-        return findExeInInstallLocation(installLocation);
+        return tryExeFromIcon(displayIcon)
+            .then(exeFromIconLocation => {
+                if(exeFromIconLocation){
+                    return exeFromIconLocation;
+                }
+                return findExeInInstallLocation(installLocation);
+            });
     }
 
     const apps = await getInstalledApps();
 
-    return apps
+    const appPromises = apps
         .filter(app => isUserApp(app))
-        .map(app => {
+        .map(async app => {
+            const processName = await extractProcessName(app['DisplayIcon'], app['UninstallString'], app['InstallLocation']);
             return {
                 displayName: (app.hasOwnProperty("DisplayName") && app.DisplayName) ? app.DisplayName : app.appName,
-                processName: extractProcessName(app['DisplayIcon'] , app['UninstallString'], app['InstallLocation']),
+                processName,
                 iconPath: app['DisplayIcon'],
                 installationPath: app['InstallLocation']
             }
         });
+
+    return Promise.all(appPromises);
 }
 
 ipcMain.handle('getAllInstalledApps', async () => {
@@ -665,41 +767,54 @@ ipcMain.handle('getBlockData', async () => readData('blockData.json'));
 ipcMain.handle('getPreferences', async () => readData('savedPreferences.json'));
 
 ipcMain.on('saveData', (event, args) => {
-    writeData(args.data, args.fileName);
+    const filename = args.fileName;
+    writeData(args.data, filename)
+        .then(() => console.log("Successfully saved data to file: " + filename))
+        .catch(error => {
+            console.log("Failed to save data to file: " + filename);
+            console.log(error);
+        });
 });
 
 ipcMain.on('isSafeSearchEnforced', async () => isSafeSearchEnforced());
 
 function writeData(data, filename) {
     const dataPath = getDataPath(filename);
-    if (fs.existsSync(dataPath)) {
-        const stat = fs.lstatSync(dataPath);
-        if (stat.isDirectory()) {
-            fs.rmdirSync(dataPath, { recursive: true });
-        }
-    }
 
-    const dir = path.dirname(dataPath);
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-    }
-
-    fs.writeFileSync(dataPath, JSON.stringify(data, null, 2));
+    return fsp.lstat(dataPath)
+        .then(stat => {
+            if (stat.isDirectory()) {
+                return fsp.rm(dataPath, { recursive: true, force: true });
+            }
+        })
+        .catch(() => {})
+        .then(() => fsp.mkdir(path.dirname(dataPath), { recursive: true }))
+        .then(() => fsp.writeFile(dataPath, JSON.stringify(data, null, 2), "utf-8"))
+        .then(() => console.log(`[writeData] Saved data to ${dataPath}`))
+        .catch(error => console.error(`[writeData] Failed to write:`, error));
 }
 
-function reactivateTimers(activeTimers) {
-    const filename = 'timers.json';
-    const data = readData(filename);
+async function reactivateTimers(activeTimers) {
+    const filename = 'savedPreferences.json';
+    const savedPreferencesData = await readData(filename);
+    const data = savedPreferencesData.timerInfo || {};
 
-    Object.keys(data).forEach(settingId => {
-        const timer = data[settingId];
+    console.log("Here: " + data);
+
+    Object.entries(data).forEach(([settingId, timer]) => {
+        if (!timer || typeof timer !== "object" || !("delayTimeout" in timer)) {
+            console.log(`⏭️ Skipping non-timer entry: ${settingId}`);
+            return;
+        }
+
         const elapsed = Date.now() - timer.startTimeStamp;
         const remaining = timer.delayTimeout - elapsed;
 
         if (remaining > 0) {
-            console.log("starting timer for :", settingId + " with a remaining time: ", remaining);
-            startCountdownTimer(activeTimers, settingId, remaining);
+            console.log(`⏱️ Restarting timer "${settingId}" with ${remaining}ms remaining`);
+            startCountdownTimer(activeTimers, settingId, remaining, timer.targetTimeout);
         } else {
+            console.log("Handling expirations for setting with id: " + settingId);
             handleExpiration(settingId, timer.targetTimeout);
         }
     });
@@ -721,7 +836,7 @@ function renderTable() {
 function handleExpiration(settingId, targetTimeout){
     const delimiter = '-->';
     if(settingId === "delayTimeout"){
-        savePreference(settingId, targetTimeout);
+        void savePreference(settingId, targetTimeout);
     }
     else if(settingId.includes(delimiter)){
         const splits = settingId.split(delimiter);
@@ -729,75 +844,77 @@ function handleExpiration(settingId, targetTimeout){
         const item = splits[1];
 
         const keyInBlockData = (key === 'site') ? 'allowedForUnblockWebsites' : 'allowedForUnblockApps';
-        let blockData = readData('savedPreferences.json');
-        if(!blockData.hasOwnProperty(keyInBlockData)){
-            blockData[keyInBlockData] = [];
-        }
+        readData('savedPreferences.json')
+            .then(blockData => {
+                if(!blockData.hasOwnProperty(keyInBlockData)){
+                    blockData[keyInBlockData] = [];
+                }
 
-        blockData[keyInBlockData].push(item);
-        renderTable();
+                blockData[keyInBlockData].push(item);
+                renderTable();
+            });
     }
     else{
-        savePreference(settingId, false);
+        void savePreference(settingId, false);
     }
     turnOffSetting(settingId);
 }
 
 function startCountdownTimer(activeTimers, settingId, remainingTime, targetTimeout = null) {
-    //const delayTimeout = getPreference("delayTimeout", preferencesPath);
     const filename = 'savedPreferences.json';
-    const delayTimeout = 30000;
-    const startTimeStamp = Date.now();
-    const endTime = startTimeStamp + delayTimeout;
-    const mainData = readData(filename);
 
-    const intervalId = setInterval(() => {
-        const now = Date.now();
-        const remaining = Math.max(endTime - now, 0);
+    if (!activeTimers) {
+        activeTimers = new Map();
+    }
 
-        const data = mainData?.timerInfo ?? {};
+    if (activeTimers.has(settingId)) {
+        clearInterval(activeTimers.get(settingId).intervalId);
+        activeTimers.delete(settingId);
+    }
 
-        if (remaining <= 0) {
-            clearInterval(intervalId);
-            activeTimers.delete(settingId);
+    return checkSavedPreferences("delayTimeout")
+        .then((delayTimeout) => {
+            const startTimeStamp = Date.now();
 
-            void handleExpiration(settingId, targetTimeout);
+            const effectiveDelay = remainingTime || delayTimeout;
+            const endTime = startTimeStamp + effectiveDelay;
 
-            if(data.hasOwnProperty(settingId)){
-                delete data[settingId];
-            }
-        } else {
-            activeTimers.set(settingId, {
-                intervalId,
-                endTime
-            });
+            return readData(filename).then((mainData) => {
+                if (!mainData.timerInfo) mainData.timerInfo = {};
 
-            remainingTime = !remainingTime ? delayTimeout : remaining
-
-            if(!data[settingId]){
-                data[settingId] = {
-                    delayTimeout,
-                    remainingTime,
+                mainData.timerInfo[settingId] = {
+                    delayTimeout: effectiveDelay,
                     startTimeStamp,
                     targetTimeout
-                }
-            }
-        }
+                };
 
-        const blockData = readData(filename);
-        void writeData({
-            ...blockData,
-            timerInfo: data
-        }, filename);
+                return writeData(mainData, filename).then(() => {
+                    const intervalId = setInterval(() => {
+                        const now = Date.now();
+                        const remaining = Math.max(endTime - now, 0);
 
-    }, 1000);
+                        if (remaining <= 0) {
+                            clearInterval(intervalId);
+                            activeTimers.delete(settingId);
 
-    activeTimers.set(settingId, {
-        intervalId,
-        endTime
-    });
+                            delete mainData.timerInfo[settingId];
 
-    console.log(`🟢 Started timer for ${settingId}`);
+                            writeData(mainData, filename)
+                                .then(() => {
+                                    handleExpiration(settingId, targetTimeout);
+                                    console.log(`⏹️ Timer expired for ${settingId}`);
+                                });
+                        } else {
+                            console.log(`🔄 [${settingId}] ${remaining}ms left`);
+                        }
+                    }, 1000);
+
+                    activeTimers.set(settingId, { intervalId, endTime });
+                    console.log(`🟢 Started timer for ${settingId}`);
+                });
+            });
+        })
+        .catch((err) => console.error("❌ Failed to start timer:", err));
 }
 
 async function getActiveInterfaceName() {
@@ -948,71 +1065,96 @@ function appBlockProtection() {
     let monitoringInterval = null;
     const activeOverlays = new Set();
 
-    const getBlockedAppsList = () => {
-        const blockData = readData('blockData.json');
+    const getBlockedAppsList = async () => {
+        const blockData = await readData('blockData.json');
         const blockedLists = blockData ? blockData.blockedApps : [];
         return blockedLists || [];
     };
 
     const checkBlockedApps = async () => {
-        const processMap = await getAllProcessInfo();
-        const blockedApps = getBlockedAppsList();
+        return getAllProcessInfo()
+            .then(processMap => {
+                getBlockedAppsList()
+                    .then(blockedApps => {
+                        blockedApps.forEach(app => {
+                            const processNameBase = app.processName.replace('.exe', '').toLowerCase();
+                            const displayName = app.displayName;
+                            const processInfo = processMap.get(processNameBase);
 
-        blockedApps.forEach(app => {
-            const processNameBase = app.processName.replace('.exe', '').toLowerCase();
-            const displayName = app.displayName;
-            const processInfo = processMap.get(processNameBase);
+                            let isRunning = false;
 
-            let isRunning = false;
+                            if (processInfo) {
+                                isRunning = true;
+                            } else {
+                                for (const [key, proc] of processMap) {
+                                    if (key !== '_meta' && proc.windowTitle &&
+                                        proc.windowTitle.toLowerCase().includes(displayName.toLowerCase())) {
+                                        isRunning = true;
+                                        break;
+                                    }
+                                }
+                            }
 
-            if (processInfo) {
-                isRunning = true;
-            } else {
-                for (const [key, proc] of processMap) {
-                    if (key !== '_meta' && proc.windowTitle &&
-                        proc.windowTitle.toLowerCase().includes(displayName.toLowerCase())) {
-                        isRunning = true;
-                        break;
-                    }
-                }
-            }
-
-            if (isRunning) {
-                if (!activeOverlays.has(app.processName)) {
-                    console.log(`⚠️ Blocked app ${displayName} is running.`);
-                    flagAppWithOverlay(displayName, app.processName);
-                    activeOverlays.add(app.processName);
-                }
-            } else {
-                activeOverlays.delete(app.processName);
-            }
-        });
+                            if (isRunning) {
+                                if (!activeOverlays.has(app.processName)) {
+                                    console.log(`⚠️ Blocked app ${displayName} is running.`);
+                                    flagAppWithOverlay(displayName, app.processName);
+                                    activeOverlays.add(app.processName);
+                                }
+                            } else {
+                                activeOverlays.delete(app.processName);
+                            }
+                        });
+                    })
+                    .catch(error => {
+                        console.log("Error encountered while getting list of blocked apps");
+                        console.log(error);
+                    });
+            });
     };
 
     const monitorBlockedApps = () => {
         if (monitoringInterval) return;
 
-        monitoringInterval = setInterval(async () => {
-            const isAppBlockingEnabled = checkSavedPreferences("overlayRestrictedContent");
-
-
-            if (!isAppBlockingEnabled) {
-                clearInterval(monitoringInterval);
-                monitoringInterval = null;
-                activeOverlays.clear();
-                return;
-            }
-
-            await checkBlockedApps();
+        monitoringInterval = setInterval( () => {
+            checkSavedPreferences("overlayRestrictedContent")
+                .then(isAppBlockingEnabled => {
+                    if(isAppBlockingEnabled){
+                        void checkBlockedApps();
+                    } else{
+                        clearInterval(monitoringInterval);
+                        monitoringInterval = null;
+                        activeOverlays.clear();
+                    }
+                })
+                .catch(() => console.log("Error encountered while checking saved preferences"));
         }, 8000);
     };
 
-    const mainCall = async () => {
-        const isAppBlockingEnabled = checkSavedPreferences("overlayRestrictedContent");
-        if (isAppBlockingEnabled) {
-            await checkBlockedApps();
-            monitorBlockedApps();
-        }
+    const mainCall = () => {
+        checkSavedPreferences("overlayRestrictedContent")
+            .then(isAppBlockingEnabled => {
+                if(!isAppBlockingEnabled){
+                    return;
+                }
+
+                checkBlockedApps()
+                    .then(() => monitorBlockedApps())
+                    .then(() => {
+                        isTaskManagerOpen((running) => {
+                            if (running) {
+                                console.log("⚠️ Task Manager is OPEN!");
+                                void flagAppWithOverlay("Task Manager", 'Taskmgr.exe');
+                            } else {
+                                console.log("✅ Task Manager is CLOSED.");
+                            }
+                        });
+                    })
+                    .catch(error => {
+                        console.log("Encountered error while checking and blocking disallowed apps");
+                        console.log(error);
+                    });
+            });
     };
 
     void mainCall();
@@ -1081,37 +1223,47 @@ function monitorApp(command) {
 }
 
 function settingsProtectionOn() {
-    const monitorSettings = async () => {
-        try {
-            const hostMonitoringCommand = `powershell -Command "Get-Process notepad -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -match 'hosts' }"`;
-            const isHostsFileFlagged = await monitorApp(hostMonitoringCommand);
-
-            if(isHostsFileFlagged){
-                flagAppWithOverlay("Notepad (hosts file)", "notepad.exe");
-                return false;
-            }
-
-            const controlPanelMonitorCommand =  `powershell -Command "Get-Process | Where-Object { $_.MainWindowTitle -match 'Control Panel' }"`;
-
-            const isControlPanelOpen = await monitorApp(controlPanelMonitorCommand);
-            if(isControlPanelOpen){
-                flagAppWithOverlay("Control Panel", "control.exe");
-                return false;
-            }
-
-        } catch (e) {
-            console.error("Error monitoring settings:", e);
-        }
-    };
-
-    if (checkSavedPreferences("blockSettingsSwitch")) {
-        const settingsInterval = setInterval(monitorSettings, 12000);
-
-        void monitorSettings();
-        appBlockProtection();
-
-        return settingsInterval;
+    const monitorSettings = () => {
+        const hostMonitoringCommand = `powershell -Command "Get-Process notepad -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -match 'hosts' }"`;
+        const controlPanelMonitorCommand =  `powershell -Command "Get-Process | Where-Object { $_.MainWindowTitle -match 'Control Panel' }"`;
+        return monitorApp(hostMonitoringCommand)
+            .then(isHostsFileFlagged => {
+                if(isHostsFileFlagged){
+                    void flagAppWithOverlay("Notepad (hosts file)", "notepad.exe");
+                    return Promise.reject("break");
+                }
+                return monitorApp(controlPanelMonitorCommand);
+            })
+            .then(isControlPanelOpen => {
+                if(isControlPanelOpen){
+                    void flagAppWithOverlay("Control Panel", "control.exe");
+                    return Promise.reject("break");
+                }
+            })
+            .catch(error => {
+                if(error === "break"){
+                    return;
+                }
+                console.error("Error monitoring settings:", error);
+            });
     }
+
+    checkSavedPreferences("blockSettingsSwitch")
+        .then(isSettingsBlockOn => {
+            if(!isSettingsBlockOn){
+                return;
+            }
+            const settingsInterval = setInterval(monitorSettings, 12000);
+
+            void monitorSettings();
+            appBlockProtection();
+
+            return settingsInterval;
+        })
+        .catch(error => {
+            console.log("Encountered error while enforcing settings protection");
+            console.log(error);
+        });
 }
 
 async function enforceSafeSearch() {
@@ -1164,11 +1316,24 @@ function isSafeSearchEnforced() {
         '127.0.0.1 yandex.com/images'
     ];
 
-    try {
-        const content = fs.readFileSync(HOSTS_PATH, 'utf8');
-        return requiredEntries.every(entry => content.includes(entry));
-    } catch (err) {
-        console.error('❌ Error reading hosts file:', err.message);
-        return false;
-    }
+    return fsp.readFile(HOSTS_PATH, 'utf8')
+        .then(content => requiredEntries.every(entry => content.includes(entry)))
+        .catch(error => {
+            console.error('❌ Error reading hosts file:', error.message);
+            return false;
+        });
+}
+
+function closeTaskManager() {
+    return new Promise((resolve) => {
+        exec('taskkill /IM Taskmgr.exe /F', (err) => {
+            if (err) {
+                console.error('Failed to close Task Manager:', err);
+                resolve(false);
+            } else {
+                console.log('Task Manager closed successfully');
+                resolve(true);
+            }
+        });
+    });
 }

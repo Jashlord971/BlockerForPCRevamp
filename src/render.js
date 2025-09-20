@@ -25,6 +25,9 @@ function setUpAppInfo(){
             window.currentAppInfo = { displayName, processName , isManualOverrideAllowed};
         });
     }
+    else{
+        window.electronAPI.closeOverlay();
+    }
 }
 
 function showElement(id) {
@@ -42,22 +45,28 @@ function initializeCloseButton(){
     }
     closeButton.addEventListener('click', () => {
         if (window.currentAppInfo && window.electronAPI?.requestCloseApp) {
-            window.electronAPI.requestCloseApp(window.currentAppInfo);
-
-            const loadingIcon = document.getElementById('loading');
-            if(loadingIcon){
-                loadingIcon.style.display = 'block';
+            if(window.currentAppInfo.processName.toLowerCase() === 'taskmgr.exe'){
+                window.electronAPI.closeTaskManager();
             }
+            else{
+                window.electronAPI.requestCloseApp(window.currentAppInfo);
 
-            closeButton.disabled = true;
-            closeButton.textContent = "Closing...";
+                const loadingIcon = document.getElementById('loading');
+                if(loadingIcon){
+                    loadingIcon.style.display = 'block';
+                }
 
-            setTimeout(() => {
-                showElement('hidden');
-                hideElement('shown');
-            }, 60_000);
+                closeButton.disabled = true;
+                closeButton.textContent = "Closing...";
+
+                setTimeout(() => {
+                    showElement('hidden');
+                    hideElement('shown');
+                }, 60_000);
+            }
         }
         else {
+            window.electronAPI.closeOverlay();
             throw new Error("Missing app info or electronAPI");
         }
     });
