@@ -136,19 +136,10 @@
     </div>
 
     <div class="pref-row">
-        <div class="label-text">Settings Protection</div>
-        <div class="info-icon" data-description="Allows the app to block sensitive system settings when enabled.">💡</div>
+        <div class="label-text">Settings and App Protection</div>
+        <div class="info-icon" data-description="Allows the app to block sensitive system settings when enabled. This includes protections against having the app installed">💡</div>
         <label class="switch">
             <input type="checkbox" id="blockSettingsSwitch">
-            <span class="slider"></span>
-        </label>
-    </div>
-
-    <div class="pref-row">
-        <div class="label-text">Protect App from Uninstallation</div>
-        <div class="info-icon" data-description="Makes it harder to uninstall the app without permissions or delay.">💡</div>
-        <label class="switch">
-            <input type="checkbox" id="appUninstallationProtection">
             <span class="slider"></span>
         </label>
     </div>
@@ -158,6 +149,15 @@
         <div class="info-icon" data-description="This enforces safe search on google and bing if your dns settings are not strict">💡</div>
         <label class="switch">
             <input type="checkbox" id="enforceSafeSearch">
+            <span class="slider"></span>
+        </label>
+    </div>
+
+    <div class="pref-row">
+        <div class="label-text">Malicious App Blacklist</div>
+        <div class="info-icon" data-description="This blocks known dangerous apps like ones that bypass dns settings, access adult content, and gambling">💡</div>
+        <label class="switch">
+            <input type="checkbox" id="maliciousAppBlacklist">
             <span class="slider"></span>
         </label>
     </div>

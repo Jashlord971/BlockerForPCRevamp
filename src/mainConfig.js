@@ -17,7 +17,8 @@ async function updateUIState() {
         'overlayRestrictedContent',
         'blockSettingsSwitch',
         'appUninstallationProtection',
-        'enforceSafeSearch'
+        'enforceSafeSearch',
+        'maliciousAppBlacklist'
     ];
 
     for (const id of switchIds) {
@@ -87,7 +88,8 @@ function initializeProtectiveDNS() {
     });
 }
 
-function initializeGenericSwitch(id) {
+function settingsProtectionSwitch() {
+    const id = 'blockSettingsSwitch';
     const settingsProtection = document.getElementById(id);
     if (!settingsProtection || settingsProtection._hasListener) return;
     settingsProtection._hasListener = true;
@@ -100,6 +102,7 @@ function initializeGenericSwitch(id) {
         } else {
             const currentValue = await checkSavedPreferences(id);
             void savePreference(id, !currentValue);
+            void ipcRenderer.invoke('activateSettingsProtection');
         }
     });
 }
@@ -168,8 +171,7 @@ function initializeTooltips() {
 function initializeEventListeners() {
     initializeOverlaySettingSwitch();
     initializeProtectiveDNS();
-    initializeGenericSwitch('blockSettingsSwitch');
-    initializeGenericSwitch('appUninstallationProtection');
+    settingsProtectionSwitch();
     initializeSafeSearchSwitch();
     initializeTooltips();
 }

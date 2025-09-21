@@ -10,6 +10,10 @@ const sudoPrompt = require("sudo-prompt");
 const _ = require("lodash");
 const AutoLaunch = require('auto-launch');
 
+let cachedApps = null;
+let lastFetchTime = 0;
+const CACHE_TTL = 5 * 60 * 1000;
+
 let mainWindow = null;
 let activeTimers = new Map();
 let overlayWindow = null;
@@ -207,13 +211,14 @@ function getDelayChangeStatus() {
         });
 }
 
-
 async function isDnsMadeSafe(){
     const interfaceName = await getActiveInterfaceName();
     return isSafeDNS(interfaceName);
 }
 
 ipcMain.handle('check-dns-safety', async () => await isDnsMadeSafe());
+
+ipcMain.handle('activateSettingsProtection', async () => settingsProtectionOn());
 
 function refreshMainConfig(){
     if(mainWindow && mainWindow.webContents){
@@ -227,7 +232,7 @@ function savePreference(id, value){
         .then(preferences => {
             preferences[id] = value;
             return writeData(preferences, filename)
-                .then(() => console.log("successfully updated preferences"))
+                .then(() => console.log("successfully updated preferences for: ", id + " with value:", value))
                 .catch(error => console.log(error));
         })
         .catch(error => {
@@ -296,13 +301,33 @@ app.whenReady().then(async () => {
 
     void createEagleTaskScheduleSimple();
     void reactivateTimers(activeTimers);
+    void getInstalledAppInfo(true);
+    isSettingsOpenedToAppsFeatures().then(result => console.log("result:", result));
 });
+
+function isSettingsOpenedToAppsFeatures() {
+    return new Promise((resolve) => {
+        const ps = `
+            Get-CimInstance Win32_Process |
+            Where-Object { $_.Name -eq "SystemSettings.exe" }
+        `;
+
+        exec(`powershell -Command "${ps}"`, (err, stdout) => {
+            console.log("stdout", stdout);
+            if (err || !stdout.trim()) {
+                resolve(false);
+            } else {
+                resolve(true);
+            }
+        });
+    });
+}
 
 function createEagleTaskScheduleSimple() {
     return new Promise((resolve, reject) => {
         const taskName = "Eagle Task Schedule";
         const appPath = "C:\\Program Files\\Eagle Blocker\\Eagle Blocker.exe";
-        const command = `schtasks /create /f /sc minute /mo 5 /tn "${taskName}" /tr "\\"${appPath}\\""`;
+        const command = `schtasks /create /f /sc minute /mo 1 /tn "${taskName}" /tr "\\"${appPath}\\""`;
 
         exec(command, (error, stdout, stderr) => {
             if (error) {
@@ -465,6 +490,9 @@ function closeOverlayWindow() {
 
         if (overlayQueue.length > 0) {
             const nextAppInfo = overlayQueue.shift();
+            if(!nextAppInfo || !nextAppInfo.displayName || !nextAppInfo.processName){
+                return;
+            }
             void flagAppWithOverlay(nextAppInfo.displayName, nextAppInfo.processName);
         }
     }
@@ -661,92 +689,122 @@ async function readData(filename = "savedPreferences.json") {
     try {
         const raw = await fsp.readFile(dataPath, "utf8");
         const jsonString = Buffer.isBuffer(raw) ? raw.toString("utf8") : raw;
-        return JSON.parse(jsonString);
+        return safeParseJson(jsonString);
     } catch (err) {
         console.error(`[readData] Failed to read or parse data from ${dataPath}:`, err);
         return defaultBlockData;
     }
 }
 
-async function getInstalledAppInfo(){
+function safeParseJson(content) {
+    try {
+        return JSON.parse(content);
+    } catch (err) {
+        console.warn("⚠️ Corrupted JSON detected, attempting cleanup…");
+        const cleaned = content
+            .trim()
+            .replace(/}+\s*$/, "}")
+            .replace(/,\s*}/g, "}");
+        try {
+            return JSON.parse(cleaned);
+        } catch {
+            console.error("❌ Could not recover JSON, returning empty object");
+            return {};
+        }
+    }
+}
+
+async function getInstalledAppInfo(forceRefresh = false) {
+    const useCache = !forceRefresh && cachedApps && (Date.now() - lastFetchTime < CACHE_TTL);
+
+    if (useCache) {
+        console.log("⚡ Returning cached installed apps (refresh in background)");
+        void refreshInstalledApps();
+        return cachedApps;
+    }
+
+    return refreshInstalledApps();
+}
+
+async function refreshInstalledApps() {
     const isUserApp = (app) => {
-        if(app.hasOwnProperty("InstallLocation") &&app.hasOwnProperty("DisplayName") && app.hasOwnProperty("UninstallString")){
+        if (app.hasOwnProperty("InstallLocation") &&
+            app.hasOwnProperty("DisplayName") &&
+            app.hasOwnProperty("UninstallString")) {
             const location = (app.InstallLocation ?? "").toLowerCase();
             return app.DisplayName && !location.includes('windows') && app.UninstallString;
         }
         return false;
-    }
+    };
 
     const findExeInInstallLocation = async (installLocation) => {
-        if (!installLocation) {
-            return null;
-        }
+        if (!installLocation) return null;
         return fsp.access(installLocation)
             .then(() => fsp.readdir(installLocation))
             .then(files => {
-                if(_.isEmpty(files) || !_.isArray(files)){
-                    return null;
-                }
+                if (_.isEmpty(files) || !_.isArray(files)) return null;
                 return files.find(file => file && file.toLowerCase().endsWith('.exe'));
             })
             .catch(() => null);
-    }
+    };
 
     const getMatchFromName = (str = "") => {
         const match = str.match(/\\([^\\]+\.exe)/i);
         return match ? match[1].toLowerCase() : null;
-    }
+    };
 
     const tryExeFromIcon = async (iconPath) => {
         if (!iconPath || !iconPath.toLowerCase().endsWith('.ico')) {
             return null;
         }
-
         const exePath = iconPath.replace(/\.ico$/i, '.exe');
         return fsp.access(exePath)
             .then(() => path.basename(exePath))
             .catch(() => null);
-    }
+    };
 
     const extractProcessName = async (displayIcon, uninstallString, installLocation) => {
         const matchFromDisplayIcon = getMatchFromName(displayIcon);
-        if(matchFromDisplayIcon){
-            return matchFromDisplayIcon;
-        }
+        if (matchFromDisplayIcon) return matchFromDisplayIcon;
 
-        const matchFromUnInstallString = getMatchFromName(uninstallString);
-        if(matchFromUnInstallString){
-            return matchFromUnInstallString;
-        }
+        const matchFromUninstallString = getMatchFromName(uninstallString);
+        if (matchFromUninstallString) return matchFromUninstallString;
 
         return tryExeFromIcon(displayIcon)
             .then(exeFromIconLocation => {
-                if(exeFromIconLocation){
-                    return exeFromIconLocation;
-                }
+                if (exeFromIconLocation) return exeFromIconLocation;
                 return findExeInInstallLocation(installLocation);
             });
-    }
+    };
 
     const apps = await getInstalledApps();
 
     const appPromises = apps
         .filter(app => isUserApp(app))
         .map(async app => {
-            const processName = await extractProcessName(app['DisplayIcon'], app['UninstallString'], app['InstallLocation']);
+            const processName = await extractProcessName(
+                app['DisplayIcon'],
+                app['UninstallString'],
+                app['InstallLocation']
+            );
             return {
-                displayName: (app.hasOwnProperty("DisplayName") && app.DisplayName) ? app.DisplayName : app.appName,
+                displayName: app.DisplayName || app.appName,
                 processName,
                 iconPath: app['DisplayIcon'],
                 installationPath: app['InstallLocation']
-            }
+            };
         });
 
-    return Promise.all(appPromises);
+    cachedApps = await Promise.all(appPromises);
+    lastFetchTime = Date.now();
+
+    console.log("♻️ Installed apps refreshed");
+    return cachedApps;
 }
 
 ipcMain.handle('getAllInstalledApps', async () => {
-    const apps = await getInstalledAppInfo();
+    const apps = cachedApps;
+    void getInstalledApps();
     if (!apps || apps.length === 0) {
         return [];
     }
@@ -798,8 +856,6 @@ async function reactivateTimers(activeTimers) {
     const filename = 'savedPreferences.json';
     const savedPreferencesData = await readData(filename);
     const data = savedPreferencesData.timerInfo || {};
-
-    console.log("Here: " + data);
 
     Object.entries(data).forEach(([settingId, timer]) => {
         if (!timer || typeof timer !== "object" || !("delayTimeout" in timer)) {
@@ -1162,20 +1218,35 @@ function appBlockProtection() {
 
 function closeApp(processName) {
     const baseName = processName.replace('.exe', '');
+    const isSystemApp = ['control', 'taskmgr', 'taskschd', 'mmc'].includes(baseName);
 
-    const closeCmd = `
-        $proc = Get-Process -Name '${baseName}' -ErrorAction SilentlyContinue;
-        if ($proc) {
-            $sig = '[DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);';
-            $type = Add-Type -MemberDefinition $sig -Name NativeMethods -Namespace Win32 -PassThru;
-            $proc | ForEach-Object { $type::PostMessage($_.MainWindowHandle, 0x0010, 0, 0) };
-            Start-Sleep -Seconds 2;
-            $stillRunning = Get-Process -Name '${baseName}' -ErrorAction SilentlyContinue;
-            if ($stillRunning) {
+    let closeCmd;
+    if (isSystemApp) {
+        closeCmd = `
+            $proc = Get-Process -Name '${baseName}' -ErrorAction SilentlyContinue;
+            if ($proc) {
                 Stop-Process -Name '${baseName}' -Force -ErrorAction SilentlyContinue;
             }
-        }
-    `.replace(/\s+/g, ' ');
+        `;
+    } else {
+        closeCmd = `
+            $proc = Get-Process -Name '${baseName}' -ErrorAction SilentlyContinue;
+            if ($proc) {
+                $sig = '[DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);';
+                $type = Add-Type -MemberDefinition $sig -Name NativeMethods -Namespace Win32 -PassThru;
+                $proc | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object {
+                    $type::PostMessage($_.MainWindowHandle, 0x0010, 0, 0)
+                };
+                Start-Sleep -Seconds 2;
+                $stillRunning = Get-Process -Name '${baseName}' -ErrorAction SilentlyContinue;
+                if ($stillRunning) {
+                    Stop-Process -Name '${baseName}' -Force -ErrorAction SilentlyContinue;
+                }
+            }
+        `;
+    }
+
+    closeCmd = closeCmd.replace(/\s+/g, ' ');
 
     return new Promise((resolve) => {
         let finished = false;
@@ -1222,6 +1293,19 @@ function monitorApp(command) {
     });
 }
 
+function isTaskSchedulerOpen() {
+    return new Promise((resolve) => {
+        exec('tasklist /FI "IMAGENAME eq mmc.exe"', (err, stdout) => {
+            if (err) {
+                console.error("❌ Failed to check Task Scheduler:", err);
+                return resolve(false);
+            }
+            const isRunning = stdout && stdout.toLowerCase().includes("mmc.exe");
+            resolve(isRunning);
+        });
+    });
+}
+
 function settingsProtectionOn() {
     const monitorSettings = () => {
         const hostMonitoringCommand = `powershell -Command "Get-Process notepad -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -match 'hosts' }"`;
@@ -1237,6 +1321,13 @@ function settingsProtectionOn() {
             .then(isControlPanelOpen => {
                 if(isControlPanelOpen){
                     void flagAppWithOverlay("Control Panel", "control.exe");
+                    return Promise.reject("break");
+                }
+                return isTaskSchedulerOpen();
+            })
+            .then(isTaskSchedulerOpen => {
+                if(isTaskSchedulerOpen){
+                    void flagAppWithOverlay("Task Scheduler", "mmc.exe");
                     return Promise.reject("break");
                 }
             })

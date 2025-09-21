@@ -4,9 +4,9 @@
   "allowedForUnblockWebsites": false,
   "allowedForUnblockApps": false,
   "overlayRestrictedContent": false,
-  "enableProtectiveDNS": false,
-  "blockSettingsSwitch": true,
-  "appUninstallationProtection": false,
+  "enableProtectiveDNS": true,
+  "blockSettingsSwitch": false,
+  "appUninstallationProtection": true,
   "enforceSafeSearch": true,
   "delayTimeout": 180000,
   "timerInfo": {
@@ -23,6 +23,5 @@
       "startTimeStamp": 1758348699035,
       "targetTimeout": null
     }
-  },
-  "lastManualChangeTimestamp": false
-}
+  }
+}}
