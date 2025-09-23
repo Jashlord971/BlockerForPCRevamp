@@ -4,10 +4,11 @@ const {exec} = require("child_process");
 const util = require('util');
 const execPromise = util.promisify(exec);
 const {getInstalledApps}  = require("get-installed-apps");
-const fs = require("fs");
+const fs = require('fs');
 const fsp = require("fs").promises;
 const sudoPrompt = require("sudo-prompt");
 const _ = require("lodash");
+const { Worker } = require('worker_threads');
 const AutoLaunch = require('auto-launch');
 
 let cachedApps = null;
@@ -15,6 +16,9 @@ let lastFetchTime = 0;
 const CACHE_TTL = 5 * 60 * 1000;
 
 let mainWindow = null;
+let blockData = {};
+let preferences = {};
+
 let activeTimers = new Map();
 let overlayWindow = null;
 let dnsConfirmationModal = null;
@@ -35,38 +39,19 @@ function getHtmlPath(fileName) {
     return path.join(__dirname, fileName);
 }
 
-function getDataPath(fileName) {
-    if (!fs.existsSync(basePath)) {
-        fs.mkdirSync(basePath, { recursive: true });
-    }
-    return path.join(basePath, fileName);
+function ensureDataDirectory() {
+    return fsp.access(basePath)
+        .catch(() => fsp.mkdir(basePath, { recursive: true }));
 }
 
-function createWindow() {
-    mainWindow = new BrowserWindow({
-        width: 800,
-        height: 600,
-        webPreferences: {
-            nodeIntegration: true,
-            contextIsolation: false,
-            webSecurity: false,
-        }
-    });
-
-    mainWindow.loadFile(getHtmlPath('mainConfig.html')).then(() => {
-        const customMenu = Menu.buildFromTemplate(getMenuTemplate());
-        Menu.setApplicationMenu(customMenu);
-    });
-
-    if(flag){
-        makeWindowNotClosable(mainWindow);
-    }
-}
-
-async function checkSavedPreferences(id){
+function checkSavedPreferences(id) {
     const filename = 'savedPreferences.json';
-    const data = await readData(filename);
-    return data && data[id];
+    return readData(filename)
+        .then(data => data && data[id])
+        .catch(error => {
+            console.error("Encountered given error while trying to retrieve saved preferences: " , error);
+            return false;
+        });
 }
 
 function makeWindowNotClosable(window){
@@ -104,82 +89,134 @@ function getMenuTemplate(){
             submenu: [
                 {
                     label: 'Block Websites',
-                    click: () => openBlockWindowForWebsites()
+                    click: () => windowManager.openWindow('blockWebsites', 'blockTableForWebsites.html')
                 },
                 {
                     label: 'Block Apps',
-                    click: () => openBlockWindowForApps()
+                    click: () => windowManager.openWindow('blockApps', 'blockTableForApps.html')
                 }
             ]
         },
         {
             label: 'Settings',
-            click: () => openDelaySettingDialogBox()
+            click: () => {
+                windowManager.openWindow('settings', 'delaySettingModal.html')
+            }
         }
     ];
 }
 
-function openBlockWindowForWebsites(){
-    mainWindow.webPreferences = {
-        ...mainWindow.webPreferences,
-        nodeIntegration: false,
-        preload: 'src/preload.js'
+const windowManager = {
+    windows: new Map(),
+
+    openWindow(windowId, htmlFileName, options = {}) {
+        const existingWindow = this.windows.get(windowId);
+        if (existingWindow && !existingWindow.isDestroyed()) {
+            existingWindow.focus();
+            return existingWindow;
+        }
+
+        const defaultOptions = {
+            width: 600,
+            height: 800,
+            modal: false,
+            webPreferences: {
+                nodeIntegration: true,
+                contextIsolation: false
+            }
+        };
+
+        const newWindow = new BrowserWindow({ ...defaultOptions, ...options });
+
+        newWindow.loadFile(getHtmlPath(htmlFileName))
+            .then(() => console.log(`Successfully loaded the ${htmlFileName} window`))
+            .catch(error => {
+                console.log(`Encountered error while loading the ${htmlFileName} window`);
+                console.log(error);
+            });
+
+        newWindow.on('closed', () => {
+            this.windows.delete(windowId);
+        });
+
+        if (options.maximize !== false) {
+            newWindow.maximize();
+        }
+
+        this.windows.set(windowId, newWindow);
+        return newWindow;
     }
-    void mainWindow.loadFile(getHtmlPath('blockTableForWebsites.html'));
-}
+};
 
-async function openDelaySettingDialogBox() {
-    if(!mainWindow){
-        return;
-    }
-    mainWindow.backgroundColor = '#0047ab';
-    mainWindow.webPreferences = {
-        ...mainWindow.webPreferences,
-        nodeIntegration: false,
-        preload: getAssetPath('preload.js')
-    };
-
-    await mainWindow.loadFile(getHtmlPath('delaySettingModal.html'));
-}
-
-async function openBlockWindowForApps(){
-    mainWindow.webPreferences = {
-        ...mainWindow.webPreferences,
-        nodeIntegration: false,
-        preload: 'src/preload.js'
+function openMainConfig() {
+    if (mainWindow) {
+        mainWindow.focus();
+        return Promise.resolve(false);
     }
 
-    await mainWindow.loadFile(getHtmlPath('blockTableForApps.html'));
-}
-
-async function openMainConfig(){
-    mainWindow.backgroundColor = '#0047ab';
-    mainWindow.webPreferences = {
-        ...mainWindow.webPreferences,
-        nodeIntegration: true,
-        contextIsolation: false,
-        preload: getAssetPath('preload.js')
-    };
-
-    mainWindow.webContents.once('did-finish-load', () => {
-        getDelayChangeStatus()
-            .then(delayStatus =>  mainWindow.webContents.send('delayTimeout', delayStatus));
+    mainWindow = new BrowserWindow({
+        width: 800,
+        height: 600,
+        webPreferences: {
+            nodeIntegration: true,
+            contextIsolation: false,
+            webSecurity: false
+        },
+        backgroundColor: '#0047ab'
     });
 
-    await mainWindow.loadFile(getHtmlPath('mainConfig.html')).then(() => {
-        const customMenu = Menu.buildFromTemplate(getMenuTemplate());
-        Menu.setApplicationMenu(customMenu);
-    });
+    if (flag) {
+        makeWindowNotClosable(mainWindow);
+    }
+
+    let mainConfigRetries = 0;
+    const MAX_RETRIES = 3;
+    mainWindow.maximize();
+
+    const tryLoad = () => {
+        return mainWindow.loadFile(getHtmlPath('mainConfig.html'))
+            .then(() => {
+                const customMenu = Menu.buildFromTemplate(getMenuTemplate());
+                Menu.setApplicationMenu(customMenu);
+            })
+            .then(() => {
+                mainWindow.webContents.once('did-finish-load', () => {
+                    getDelayChangeStatus()
+                        .then(delayStatus => mainWindow.webContents.send('delayTimeout', delayStatus))
+                        .catch(error => {
+                            console.log("Encountered error while getting the delayStatus value, returning default status");
+                            console.error(error);
+                            mainWindow.webContents.send('delayTimeout', {});
+                        });
+                });
+                mainWindow.webContents.openDevTools();
+            })
+            .catch(error => {
+                console.error(`Failed to load mainConfig.html (attempt ${mainConfigRetries + 1}/${MAX_RETRIES})`, error);
+
+                if (++mainConfigRetries < MAX_RETRIES) {
+                    console.log("Retrying...");
+                    return tryLoad();
+                } else {
+                    console.error("Max retries reached. Could not load mainConfig.html");
+                    throw error;
+                }
+            });
+    };
+
+    return tryLoad();
 }
 
-const getDelayTimeOut = async () => {
+const getDelayTimeOut = () => {
     const filename = 'savedPreferences.json';
-    const preferences = await readData(filename);
-    const value = preferences.delayTimeout;
-    if(!value){
-        return 3*60*1000;
-    }
-    return value;
+    const defaultTimeout = 3 * 60 * 1000;
+    return readData(filename)
+        .then(preferences => preferences['delayTimeout'] ?? defaultTimeout)
+        .catch(error => {
+            console.log("Encountered error while getting the delay timeout value. Returning default value");
+            console.log(error);
+            return defaultTimeout;
+        });
 }
 
 function getDelayChangeStatus() {
@@ -211,12 +248,17 @@ function getDelayChangeStatus() {
         });
 }
 
-async function isDnsMadeSafe(){
-    const interfaceName = await getActiveInterfaceName();
-    return isSafeDNS(interfaceName);
+function isDnsMadeSafe(){
+    return getActiveInterfaceName()
+        .then(interfaceName => isSafeDNS(interfaceName))
+        .catch(error => {
+            console.log("Encountered error while getting to know if dns is made safe");
+            console.log(error);
+            return false;
+        });
 }
 
-ipcMain.handle('check-dns-safety', async () => await isDnsMadeSafe());
+ipcMain.handle('check-dns-safety', async () => isDnsMadeSafe());
 
 ipcMain.handle('activateSettingsProtection', async () => settingsProtectionOn());
 
@@ -252,29 +294,57 @@ function autoLaunchApp(){
     });
 }
 
-function isTaskManagerOpen(callback) {
-    exec('tasklist /FI "IMAGENAME eq Taskmgr.exe"', (err, stdout) => {
-        if (err) {
-            console.error("❌ Failed to check Task Manager:", err);
-            return callback(false);
-        }
-
-        console.log(stdout);
-        const isRunning = stdout.toLowerCase().includes("taskmgr.exe");
-        callback(isRunning);
-    });
+function isTaskManagerOpen() {
+    return execPromise('tasklist /FI "IMAGENAME eq Taskmgr.exe"')
+        .then(({ stdout }) => stdout && stdout.toLowerCase().includes("taskmgr.exe"))
+        .catch(error => {
+            console.error('Error checking Task Manager:', error);
+            return false;
+        });
 }
 
-app.whenReady().then(async () => {
+function getDataPath(filename){
+    return path.join(basePath, filename);
+}
+
+app.whenReady().then(async() => {
     if(!gotTheLock){
         app.quit();
         return false;
     }
 
+    fs.readFile(getDataPath('blockData.json'), 'utf8', (err, data) => {
+        if (err) {
+            console.error('Error:', err);
+            blockData = {};
+        } else {
+            blockData = JSON.parse(data);
+        }
+    });
+
+    fs.readFile(getDataPath('savedPreferences.json'), 'utf8', (err, data) => {
+        if (err) {
+            console.error('Error:', err);
+            preferences = {};
+        } else {
+            preferences = JSON.parse(data);
+        }
+    });
+
+    return ensureDataDirectory()
+        .then(() => {
+            openMainConfig()
+                .then(() => executeOpeningActions())
+                .catch(error => console.error("Encountered error while opening app: ", error));
+        })
+        .catch(error => console.log("Encountered error while ensuring data directory was set: ", error));
+});
+
+function executeOpeningActions(){
     isSafeSearchEnforced()
         .then(isSafeSearchEnforcedLocally => {
             if(!isSafeSearchEnforcedLocally){
-                savePreference("enforceSafeSearch", false);
+                void savePreference("enforceSafeSearch", false);
             }
         })
         .catch(error => {
@@ -282,18 +352,15 @@ app.whenReady().then(async () => {
             console.log(error);
         });
 
-    createWindow();
+    isDnsMadeSafe()
+        .then(value => {
+            if(!value){
+                savePreference("enableProtectiveDNS", false)
+                    .then(() => refreshMainConfig())
+                    .catch(error => console.log(error));
+            }
+        });
 
-    setTimeout(async () => {
-        const value = await isDnsMadeSafe();
-        if(!value){
-            savePreference("enableProtectiveDNS", false)
-                .then(() => refreshMainConfig())
-                .catch(error => console.log(error));
-        }
-    }, 4000);
-
-    //installMyService();
     settingsProtectionOn();
     appBlockProtection();
 
@@ -302,43 +369,44 @@ app.whenReady().then(async () => {
     void createEagleTaskScheduleSimple();
     void reactivateTimers(activeTimers);
     void getInstalledAppInfo(true);
-    isSettingsOpenedToAppsFeatures().then(result => console.log("result:", result));
-});
+    isSettingsOpenedToAppsFeatures()
+        .then(result => console.log("result:", result))
+        .catch(error => {
+            console.log("Encountered error while checking if settings is opened");
+            console.log(error);
+        });
+}
 
 function isSettingsOpenedToAppsFeatures() {
-    return new Promise((resolve) => {
-        const ps = `
+    const ps = `
             Get-CimInstance Win32_Process |
             Where-Object { $_.Name -eq "SystemSettings.exe" }
         `;
 
-        exec(`powershell -Command "${ps}"`, (err, stdout) => {
-            console.log("stdout", stdout);
-            if (err || !stdout.trim()) {
-                resolve(false);
-            } else {
-                resolve(true);
-            }
+    return execPromise(`powershell -Command "${ps}"`)
+        .then(({err, stdout}) => !err && stdout && stdout.trim().length > 0)
+        .catch(error => {
+            console.log("Encountered an error while checking if the settings and app features has been opened: ", error);
+            return false;
         });
-    });
 }
 
 function createEagleTaskScheduleSimple() {
-    return new Promise((resolve, reject) => {
-        const taskName = "Eagle Task Schedule";
-        const appPath = "C:\\Program Files\\Eagle Blocker\\Eagle Blocker.exe";
-        const command = `schtasks /create /f /sc minute /mo 1 /tn "${taskName}" /tr "\\"${appPath}\\""`;
+    const taskName = "Eagle Task Schedule";
+    const appPath = "C:\\Program Files\\Eagle Blocker\\Eagle Blocker.exe";
+    const command = `schtasks /create /f /sc minute /mo 1 /tn "${taskName}" /tr "\\"${appPath}\\""`;
 
-        exec(command, (error, stdout, stderr) => {
+    return execPromise(command)
+        .then(({error, stdout, stderr})=> {
             if (error) {
                 console.error("Error creating scheduled task:", stderr || error.message);
-                reject(error);
-                return;
+                return false;
             }
-            console.log("Eagle Task Schedule created successfully:", stdout);
-            resolve(stdout);
+            else{
+                console.log("Eagle Task Schedule created successfully:", stdout);
+                return true;
+            }
         });
-    });
 }
 
 const closeDNSConfirmationWindow = () => {
@@ -346,17 +414,6 @@ const closeDNSConfirmationWindow = () => {
         dnsConfirmationModal.close();
         dnsConfirmationModal = null;
     }
-}
-
-function killControlPanel() {
-    const proc =  'control.exe';
-    exec(`taskkill /IM ${proc} /F`, (err) => {
-        if (err) {
-            console.error(`Failed to kill ${proc}:`, err);
-        } else {
-            console.log(`${proc} terminated.`);
-        }
-    });
 }
 
 function removeTimer(id){
@@ -373,13 +430,20 @@ function turnOffSetting(settingId){
 }
 
 async function canFlagNow(){
-    const blockData = await readData("savedPreferences.json") || {};
-    const timerInfo = blockData.timerInfo || {};
-    const lastManualOverrideTimestamp = _.get(timerInfo, 'lastManualChangeTimestamp', undefined);
-    if(!lastManualOverrideTimestamp){
-        return true;
-    }
-    return Date.now() - lastManualOverrideTimestamp >= 30000;
+    return readData("savedPreferences.json")
+        .then(blockData => {
+            blockData = blockData ?? {};
+            const timerInfo = blockData.timerInfo || {};
+            const lastManualOverrideTimestamp = _.get(timerInfo, 'lastManualChangeTimestamp', undefined);
+            if(!lastManualOverrideTimestamp){
+                return true;
+            }
+            return Date.now() - lastManualOverrideTimestamp >= 30000;
+        })
+        .catch(error => {
+            console.log("Encountered error while reading data to determine if we can flag a given instance: ", error);
+            return true;
+        });
 }
 
 function createOverlayAndPassInfo(appInfo){
@@ -394,22 +458,29 @@ function createOverlayAndPassInfo(appInfo){
     });
 }
 
-async function flagAppWithOverlay(displayName, processName) {
-    const isManualOverrideAllowed = await canAllowManualClosure();
-    const appInfo = { displayName, processName, isManualOverrideAllowed };
-
-    if (overlayWindow) {
-        overlayQueue.push(appInfo);
-    } else {
-        const canWeFlagNow = await canFlagNow();
-        if(canWeFlagNow){
-            console.log(appInfo);
-            createOverlayAndPassInfo(appInfo);
-        }
-        else{
-            setTimeout(() => createOverlayAndPassInfo(appInfo), 30000);
-        }
-    }
+function flagAppWithOverlay(displayName, processName) {
+    return canAllowManualClosure()
+        .then(isManualOverrideAllowed => {
+            const appInfo = { displayName, processName, isManualOverrideAllowed };
+            if (overlayWindow) {
+                overlayQueue.push(appInfo);
+            } else {
+                canFlagNow()
+                    .then(result => {
+                        if(result){
+                            console.log(appInfo);
+                            createOverlayAndPassInfo(appInfo);
+                        }
+                        else{
+                            setTimeout(() => createOverlayAndPassInfo(appInfo), 30000);
+                        }
+                    })
+                    .catch(error => {
+                        console.error("Encountered this error while trying to flag event with processName: ", processName);
+                        console.log(error);
+                    });
+            }
+        });
 }
 
 function showDNSConfirmationWindow() {
@@ -461,16 +532,19 @@ function createOverlayWindow() {
 }
 
 async function canAllowManualClosure() {
-    const blockData = await readData("savedPreferences.json");
-    const timerInfo = blockData?.timerInfo || {};
-    const lastManualChange = _.get(timerInfo, "lastManualChangeTimestamp", undefined);
+    return readData("savedPreferences.json")
+        .then(blockData => {
+            const timerInfo = blockData?.timerInfo || {};
+            const lastManualChange = _.get(timerInfo, "lastManualChangeTimestamp", undefined);
 
-    if (!lastManualChange) {
-        return true;
-    }
+            if (!lastManualChange) {
+                return true;
+            }
 
-    const eightHours = 8 * 60 * 60 * 1000;
-    return (Date.now() - lastManualChange) >= eightHours;
+            const eightHours = 8 * 60 * 60 * 1000;
+            return (Date.now() - lastManualChange) >= eightHours;
+        })
+        .catch(error => console.log("Encountered the given error while checking if we can allow manual closure: ", error));
 }
 
 async function setLastManualChangeTimestamp(){
@@ -501,41 +575,50 @@ function closeOverlayWindow() {
 function checkIfAppIsStillOpenAndSetOverlayWindowIfOpen(displayName, processName) {
     const baseName = processName.replace('.exe', '');
 
-    exec(`powershell -Command "Get-Process -Name '${baseName}' -ErrorAction SilentlyContinue"`, (err, stdout) => {
-        if (err) {
-            console.error(`Error checking process ${processName}:`, err);
-            return;
-        }
-
-        if (stdout && stdout.trim().length > 0) {
-            console.log(`⚠️ ${processName} is still open. Re-opening overlay...`);
-            if (!overlayWindow) {
-                void flagAppWithOverlay(displayName, processName);
+    return execPromise(`powershell -Command "Get-Process -Name '${baseName}' -ErrorAction SilentlyContinue"`)
+        .then(({ stdout }) => {
+            if (stdout && stdout.trim().length > 0) {
+                console.log(`⚠️ ${processName} is still open. Re-opening overlay...`);
+                if (!overlayWindow) {
+                    return flagAppWithOverlay(displayName, processName);
+                }
+            } else {
+                console.log(`✅ ${processName} has been closed manually.`);
+                closeOverlayWindow();
             }
-        } else {
-            console.log(`✅ ${processName} has been closed manually.`);
-            closeOverlayWindow();
-        }
-    });
+        })
+        .catch(error => {
+            console.error(`Error checking process ${processName}:`, error);
+        });
 }
+
+ipcMain.on('openMainConfig', () => openMainConfig());
+
+ipcMain.on('openBlockApps', () => windowManager.openWindow('blockApps', 'blockTableForApps.html'));
 
 ipcMain.on('close-app-and-overlay', (event, { displayName, processName }) => {
     closeApp(processName)
-        .then(async (result) => {
+        .then((result) => {
             if(result){
                 closeOverlayWindow();
                 return;
             }
 
-            const canAllowManualCloseNow = await canAllowManualClosure();
-            if(canAllowManualCloseNow){
-                setLastManualChangeTimestamp()
-                    .then(() => {
-                        closeOverlayWindow();
-                        setTimeout(() => checkIfAppIsStillOpenAndSetOverlayWindowIfOpen(displayName, processName), 30000);
-                    })
-                    .catch(error => console.log(error));
-            }
+            return canAllowManualClosure()
+                .then(canAllowManualCloseNow => {
+                    if(canAllowManualCloseNow){
+                        setLastManualChangeTimestamp()
+                            .then(() => {
+                                closeOverlayWindow();
+                                setTimeout(() => checkIfAppIsStillOpenAndSetOverlayWindowIfOpen(displayName, processName), 30000);
+                            })
+                            .catch(error => console.log(error));
+                    }
+                })
+                .catch(error => {
+                    console.log("Encountered error while tyring to allow manual closure for app with process name:", processName);
+                    console.log(error);
+                });
         });
 });
 
@@ -581,14 +664,6 @@ ipcMain.on('renderTableCall', (event) => {
 });
 
 ipcMain.handle('getDelayChangeStatus', async () => getDelayChangeStatus());
-
-ipcMain.on('close-both', () => {
-    killControlPanel();
-    if (overlayWindow) {
-        overlayWindow.close();
-        overlayWindow = null;
-    }
-});
 
 ipcMain.on('close-timer', (event, id) => removeTimer(id));
 
@@ -670,50 +745,6 @@ async function showDelayAccountabilityDialogOrProgressDialog(settingId) {
     delayAccountDialog.setMenu(null);
 }
 
-async function readData(filename = "savedPreferences.json") {
-    const defaultBlockData = {
-        blockedApps: [],
-        blockedWebsites: [],
-        allowedForUnblockWebsites: [],
-        allowedForUnblockApps: [],
-    };
-
-    const dataPath = getDataPath(filename);
-
-    try {
-        await fsp.access(dataPath);
-    } catch {
-        return defaultBlockData;
-    }
-
-    try {
-        const raw = await fsp.readFile(dataPath, "utf8");
-        const jsonString = Buffer.isBuffer(raw) ? raw.toString("utf8") : raw;
-        return safeParseJson(jsonString);
-    } catch (err) {
-        console.error(`[readData] Failed to read or parse data from ${dataPath}:`, err);
-        return defaultBlockData;
-    }
-}
-
-function safeParseJson(content) {
-    try {
-        return JSON.parse(content);
-    } catch (err) {
-        console.warn("⚠️ Corrupted JSON detected, attempting cleanup…");
-        const cleaned = content
-            .trim()
-            .replace(/}+\s*$/, "}")
-            .replace(/,\s*}/g, "}");
-        try {
-            return JSON.parse(cleaned);
-        } catch {
-            console.error("❌ Could not recover JSON, returning empty object");
-            return {};
-        }
-    }
-}
-
 async function getInstalledAppInfo(forceRefresh = false) {
     const useCache = !forceRefresh && cachedApps && (Date.now() - lastFetchTime < CACHE_TTL);
 
@@ -726,24 +757,27 @@ async function getInstalledAppInfo(forceRefresh = false) {
     return refreshInstalledApps();
 }
 
-async function refreshInstalledApps() {
+function refreshInstalledApps() {
     const isUserApp = (app) => {
         if (app.hasOwnProperty("InstallLocation") &&
             app.hasOwnProperty("DisplayName") &&
             app.hasOwnProperty("UninstallString")) {
             const location = (app.InstallLocation ?? "").toLowerCase();
-            return app.DisplayName && !location.includes('windows') && app.UninstallString;
+            return app.DisplayName && !location.includes("windows") && app.UninstallString;
         }
         return false;
     };
 
-    const findExeInInstallLocation = async (installLocation) => {
-        if (!installLocation) return null;
+    const findExeInInstallLocation = (installLocation) => {
+        if (!installLocation){
+            return Promise.resolve(null);
+        }
+
         return fsp.access(installLocation)
             .then(() => fsp.readdir(installLocation))
             .then(files => {
                 if (_.isEmpty(files) || !_.isArray(files)) return null;
-                return files.find(file => file && file.toLowerCase().endsWith('.exe'));
+                return files.find(file => file && file.toLowerCase().endsWith(".exe"));
             })
             .catch(() => null);
     };
@@ -753,22 +787,22 @@ async function refreshInstalledApps() {
         return match ? match[1].toLowerCase() : null;
     };
 
-    const tryExeFromIcon = async (iconPath) => {
-        if (!iconPath || !iconPath.toLowerCase().endsWith('.ico')) {
-            return null;
+    const tryExeFromIcon = (iconPath) => {
+        if (!iconPath || !iconPath.toLowerCase().endsWith(".ico")) {
+            return Promise.resolve(null);
         }
-        const exePath = iconPath.replace(/\.ico$/i, '.exe');
+        const exePath = iconPath.replace(/\.ico$/i, ".exe");
         return fsp.access(exePath)
             .then(() => path.basename(exePath))
             .catch(() => null);
     };
 
-    const extractProcessName = async (displayIcon, uninstallString, installLocation) => {
+    const extractProcessName = (displayIcon, uninstallString, installLocation) => {
         const matchFromDisplayIcon = getMatchFromName(displayIcon);
-        if (matchFromDisplayIcon) return matchFromDisplayIcon;
+        if (matchFromDisplayIcon) return Promise.resolve(matchFromDisplayIcon);
 
         const matchFromUninstallString = getMatchFromName(uninstallString);
-        if (matchFromUninstallString) return matchFromUninstallString;
+        if (matchFromUninstallString) return Promise.resolve(matchFromUninstallString);
 
         return tryExeFromIcon(displayIcon)
             .then(exeFromIconLocation => {
@@ -777,29 +811,31 @@ async function refreshInstalledApps() {
             });
     };
 
-    const apps = await getInstalledApps();
+    return getInstalledApps()
+        .then(apps => {
+            const appPromises = apps
+                .filter(app => isUserApp(app))
+                .map(app =>
+                    extractProcessName(
+                        app["DisplayIcon"],
+                        app["UninstallString"],
+                        app["InstallLocation"]
+                    ).then(processName => ({
+                        displayName: _.get(app, "DisplayName") || app.appName,
+                        processName,
+                        iconPath: app["DisplayIcon"],
+                        installationPath: app["InstallLocation"]
+                    }))
+                );
 
-    const appPromises = apps
-        .filter(app => isUserApp(app))
-        .map(async app => {
-            const processName = await extractProcessName(
-                app['DisplayIcon'],
-                app['UninstallString'],
-                app['InstallLocation']
-            );
-            return {
-                displayName: app.DisplayName || app.appName,
-                processName,
-                iconPath: app['DisplayIcon'],
-                installationPath: app['InstallLocation']
-            };
+            return Promise.all(appPromises);
+        })
+        .then(appsWithProcesses => {
+            cachedApps = appsWithProcesses;
+            lastFetchTime = Date.now();
+            console.log("♻️ Installed apps refreshed");
+            return cachedApps;
         });
-
-    cachedApps = await Promise.all(appPromises);
-    lastFetchTime = Date.now();
-
-    console.log("♻️ Installed apps refreshed");
-    return cachedApps;
 }
 
 ipcMain.handle('getAllInstalledApps', async () => {
@@ -825,6 +861,7 @@ ipcMain.handle('getBlockData', async () => readData('blockData.json'));
 ipcMain.handle('getPreferences', async () => readData('savedPreferences.json'));
 
 ipcMain.on('saveData', (event, args) => {
+    console.log("Here");
     const filename = args.fileName;
     writeData(args.data, filename)
         .then(() => console.log("Successfully saved data to file: " + filename))
@@ -836,44 +873,40 @@ ipcMain.on('saveData', (event, args) => {
 
 ipcMain.on('isSafeSearchEnforced', async () => isSafeSearchEnforced());
 
-function writeData(data, filename) {
-    const dataPath = getDataPath(filename);
-
-    return fsp.lstat(dataPath)
-        .then(stat => {
-            if (stat.isDirectory()) {
-                return fsp.rm(dataPath, { recursive: true, force: true });
-            }
-        })
-        .catch(() => {})
-        .then(() => fsp.mkdir(path.dirname(dataPath), { recursive: true }))
-        .then(() => fsp.writeFile(dataPath, JSON.stringify(data, null, 2), "utf-8"))
-        .then(() => console.log(`[writeData] Saved data to ${dataPath}`))
-        .catch(error => console.error(`[writeData] Failed to write:`, error));
-}
-
-async function reactivateTimers(activeTimers) {
+function reactivateTimers(activeTimers) {
     const filename = 'savedPreferences.json';
-    const savedPreferencesData = await readData(filename);
-    const data = savedPreferencesData.timerInfo || {};
+    return readData(filename)
+        .then(savedPreferencesData => {
+            const data = _.get(savedPreferencesData, 'timerInfo', {});
+            Object.entries(data).forEach(([settingId, timer]) => {
+                if (!timer || typeof timer !== "object" || !("delayTimeout" in timer)) {
+                    console.log(`⏭️ Skipping non-timer entry: ${settingId}`);
+                    return;
+                }
 
-    Object.entries(data).forEach(([settingId, timer]) => {
-        if (!timer || typeof timer !== "object" || !("delayTimeout" in timer)) {
-            console.log(`⏭️ Skipping non-timer entry: ${settingId}`);
-            return;
-        }
+                const elapsed = Date.now() - timer.startTimeStamp;
+                const remaining = timer.delayTimeout - elapsed;
 
-        const elapsed = Date.now() - timer.startTimeStamp;
-        const remaining = timer.delayTimeout - elapsed;
-
-        if (remaining > 0) {
-            console.log(`⏱️ Restarting timer "${settingId}" with ${remaining}ms remaining`);
-            startCountdownTimer(activeTimers, settingId, remaining, timer.targetTimeout);
-        } else {
-            console.log("Handling expirations for setting with id: " + settingId);
-            handleExpiration(settingId, timer.targetTimeout);
-        }
-    });
+                if (remaining > 0) {
+                    console.log(`⏱️ Restarting timer "${settingId}" with ${remaining}ms remaining`);
+                    void startCountdownTimer(activeTimers, settingId, remaining, timer.targetTimeout);
+                } else {
+                    console.log("Handling expirations for setting with id: " + settingId);
+                    handleExpiration(settingId, timer.targetTimeout);
+                    readData(filename)
+                        .then(data => {
+                            const timerInfo = _.get(data, 'timerInfo', {});
+                            delete timerInfo[settingId];
+                            _.set(data, "timerInfo", timerInfo);
+                            void writeData(data, filename);
+                        })
+                        .catch(error => {
+                            console.log("Encountered error while reading and writing data for timerInfo");
+                            console.log(error);
+                        });
+                }
+            });
+        })
 }
 
 function renderTable() {
@@ -974,16 +1007,24 @@ function startCountdownTimer(activeTimers, settingId, remainingTime, targetTimeo
 }
 
 async function getActiveInterfaceName() {
-    const { stdout } = await execPromise('netsh interface show interface');
-
-    const lines = stdout.split('\n');
-    for (const line of lines) {
-        if (line.includes('Connected') && line.includes('Enabled')) {
-            const parts = line.trim().split(/\s{2,}/);
-            return parts[parts.length - 1];
-        }
-    }
-    throw new Error('No active interface found.');
+    return execPromise('netsh interface show interface')
+        .then(({ stdout }) => {
+            if(stdout){
+                const lines = stdout.split('\n');
+                const match = Array.from(lines)
+                    .filter(line => line)
+                    .find(line => line.includes('Connected') && line.includes('Enabled'));
+                if(match){
+                    const parts = match.trim().split(/\s{2,}/);
+                    return parts[parts.length - 1];
+                }
+            }
+            return Promise.reject("No active interface found");
+        })
+        .catch(error => {
+            console.log("Encountered the given error while trying to find active interface names: ", error);
+            return Promise.reject("No active interface found");
+        });
 }
 
 async function configureSafeDNS(isStrict) {
@@ -1033,18 +1074,20 @@ async function configureSafeDNS(isStrict) {
     }
 }
 
-async function isSafeDNS(interfaceName) {
-    try {
-        const { stdout } = await exec(`netsh interface ipv4 show dnsservers name="${interfaceName}"`);
-        return stdout.some(entry => {
-            const stringedEntry = JSON.stringify(entry);
-            return (stringedEntry.includes('185.228.168.168') && stringedEntry.includes('185.228.169.168')) ||
-                (stringedEntry.includes('208.67.222.123') && stringedEntry.includes('208.67.220.123'))
+function isSafeDNS(interfaceName) {
+    return execPromise(`netsh interface ipv4 show dnsservers name="${interfaceName}"`)
+        .then(({ stdout }) => {
+            if (!stdout) {
+                return false;
+            }
+            const hasStrictDNS = stdout.includes('185.228.168.168') && stdout.includes('185.228.169.168');
+            const hasLenientDNS = stdout.includes('208.67.222.123') && stdout.includes('208.67.220.123');
+            return hasStrictDNS || hasLenientDNS;
+        })
+        .catch(error => {
+            console.error('Failed to read DNS settings:', error);
+            return false;
         });
-    } catch (err) {
-        console.error('Failed to read DNS settings:', err);
-        return [];
-    }
 }
 
 const processCache = {
@@ -1054,14 +1097,13 @@ const processCache = {
 };
 
 const getAllProcessInfo = () => {
-    return new Promise((resolve) => {
-        const now = Date.now();
+    const now = Date.now();
 
-        if (now - processCache.lastUpdate < processCache.cacheTimeout) {
-            return resolve(processCache.data);
-        }
+    if (now - processCache.lastUpdate < processCache.cacheTimeout) {
+        return Promise.resolve(processCache.data);
+    }
 
-        const psCommand = `
+    const psCommand = `
             $processes = Get-Process | Where-Object { 
                 $_.ProcessName -or $_.MainWindowTitle 
             } | Select-Object ProcessName, MainWindowTitle, Id;
@@ -1077,62 +1119,66 @@ const getAllProcessInfo = () => {
             $result | ConvertTo-Json -Depth 3
         `;
 
-        exec(`powershell -Command "${psCommand.replace(/\s+/g, ' ')}"`, (err, stdout) => {
+    const command = `powershell -Command "${psCommand.replace(/\s+/g, ' ')}"`
+
+    return execPromise(command)
+        .then(({err, stdout}) => {
             if (err) {
                 console.error('Process query error:', err);
-                return resolve(processCache.data);
+                return processCache.data;
             }
 
-            try {
-                const result = JSON.parse(stdout);
-                const processMap = new Map();
+            const result = JSON.parse(stdout);
+            const processMap = new Map();
 
-                const processes = result['processes'];
-                if (processes) {
-                    processes.forEach(proc => {
-                        const key = proc["ProcessName"]?.toLowerCase();
-                        if (key) {
-                            processMap.set(key, {
-                                processName: proc["ProcessName"],
-                                windowTitle: proc['MainWindowTitle'] || '',
-                                id: proc['Id']
-                            });
-                        }
-                    });
-                }
-
-                processMap.set('_meta', {
-                    controlPanelOpen: result['controlPanel'],
-                    notepadHostsOpen: result['notepadHosts']
+            const processes = result['processes'];
+            if (processes) {
+                processes.forEach(proc => {
+                    const key = proc["ProcessName"]?.toLowerCase();
+                    if (key) {
+                        processMap.set(key, {
+                            processName: proc["ProcessName"],
+                            windowTitle: proc['MainWindowTitle'] || '',
+                            id: proc['Id']
+                        });
+                    }
                 });
-
-                processCache.data = processMap;
-                processCache.lastUpdate = now;
-                resolve(processMap);
-            } catch (parseErr) {
-                console.error('Parse error:', parseErr);
-                resolve(processCache.data);
             }
+
+            processMap.set('_meta', {
+                controlPanelOpen: result['controlPanel'],
+                notepadHostsOpen: result['notepadHosts']
+            });
+
+            processCache.data = processMap;
+            processCache.lastUpdate = now;
+            return processMap;
+        })
+        .catch(error => {
+            console.error('Encountered the given error when getting all the process info:', error);
+            return processCache.data;
         });
-    });
 };
 
 function appBlockProtection() {
     let monitoringInterval = null;
     const activeOverlays = new Set();
 
-    const getBlockedAppsList = async () => {
-        const blockData = await readData('blockData.json');
-        const blockedLists = blockData ? blockData.blockedApps : [];
-        return blockedLists || [];
+    const getBlockedAppsList = () => {
+        return readData('blockData.json')
+            .then(blockData => Array.from(_.get(blockData, 'blockedApps', undefined) || []))
+            .catch(error => {
+                console.log("Encountered error while getting blocked apps from DB: ", error);
+                return [];
+            });
     };
 
-    const checkBlockedApps = async () => {
+    const checkBlockedApps = () => {
         return getAllProcessInfo()
             .then(processMap => {
                 getBlockedAppsList()
                     .then(blockedApps => {
-                        blockedApps.forEach(app => {
+                        Array.from(blockedApps).forEach(app => {
                             const processNameBase = app.processName.replace('.exe', '').toLowerCase();
                             const displayName = app.displayName;
                             const processInfo = processMap.get(processNameBase);
@@ -1177,7 +1223,8 @@ function appBlockProtection() {
                 .then(isAppBlockingEnabled => {
                     if(isAppBlockingEnabled){
                         void checkBlockedApps();
-                    } else{
+                    }
+                    else{
                         clearInterval(monitoringInterval);
                         monitoringInterval = null;
                         activeOverlays.clear();
@@ -1197,14 +1244,16 @@ function appBlockProtection() {
                 checkBlockedApps()
                     .then(() => monitorBlockedApps())
                     .then(() => {
-                        isTaskManagerOpen((running) => {
-                            if (running) {
-                                console.log("⚠️ Task Manager is OPEN!");
-                                void flagAppWithOverlay("Task Manager", 'Taskmgr.exe');
-                            } else {
-                                console.log("✅ Task Manager is CLOSED.");
-                            }
-                        });
+                        isTaskManagerOpen()
+                            .then(running => {
+                                if (running) {
+                                    console.log("⚠️ Task Manager is OPEN!");
+                                    void flagAppWithOverlay("Task Manager", 'Taskmgr.exe');
+                                } else {
+                                    console.log("✅ Task Manager is CLOSED.");
+                                }
+                            })
+                            .catch(error => console.log("Encountered issue when checking if the task manager is running:", error));
                     })
                     .catch(error => {
                         console.log("Encountered error while checking and blocking disallowed apps");
@@ -1248,62 +1297,79 @@ function closeApp(processName) {
 
     closeCmd = closeCmd.replace(/\s+/g, ' ');
 
-    return new Promise((resolve) => {
-        let finished = false;
-
-        exec(`powershell -Command "${closeCmd}"`, (err) => {
-            if (err) {
-                console.error(`❌ Failed to issue close for ${processName}:`, err);
-            } else {
-                console.log(`✅ Close attempt issued for ${processName}`);
-            }
+    return execPromise(`powershell -Command "${closeCmd}"`)
+        .then(() => {
+            console.log(`✅ Close attempt issued for ${processName}`);
+            return monitorProcessClosure(baseName);
+        })
+        .catch(error => {
+            console.error(`❌ Failed to issue close for ${processName}:`, error);
+            return monitorProcessClosure(baseName);
         });
+}
 
-        const start = Date.now();
-        const interval = setInterval(() => {
-            exec(`powershell -Command "Get-Process -Name '${baseName}' -ErrorAction SilentlyContinue"`, (checkErr, stdout) => {
-                if (finished) return;
+function monitorProcessClosure(baseName) {
+    let finished = false;
+    const start = Date.now();
 
-                if (!stdout || stdout.trim().length === 0) {
-                    finished = true;
-                    clearInterval(interval);
-                    console.log(`🎉 ${processName} successfully closed`);
-                    return resolve(true);
-                }
+    return new Promise(resolve => {
+        const checkInterval = setInterval(() => {
+            if (finished) return;
 
-                if (Date.now() - start >= 60000) {
-                    finished = true;
-                    clearInterval(interval);
-                    console.warn(`⚠️ ${processName} is still running after 60s`);
-                    return resolve(false);
-                }
-            });
+            execPromise(`powershell -Command "Get-Process -Name '${baseName}' -ErrorAction SilentlyContinue"`)
+                .then(({ stdout }) => {
+                    if (finished) return;
+
+                    if (!stdout || stdout.trim().length === 0) {
+                        finished = true;
+                        clearInterval(checkInterval);
+                        console.log(`🎉 ${baseName} successfully closed`);
+                        resolve(true);
+                    } else if (Date.now() - start >= 60000) {
+                        finished = true;
+                        clearInterval(checkInterval);
+                        console.warn(`⚠️ ${baseName} is still running after 60s`);
+                        resolve(false);
+                    }
+                })
+                .catch(() => {
+                    if (!finished) {
+                        finished = true;
+                        clearInterval(checkInterval);
+                        console.log(`🎉 ${baseName} successfully closed`);
+                        resolve(true);
+                    }
+                });
         }, 5000);
     });
 }
 
+
 function monitorApp(command) {
-    return new Promise((resolve) => {
-        exec(command, (err, stdout) => {
-            if (!err && stdout.trim().length > 0) {
-                return resolve(true);
+    return execPromise(command)
+        .then(({ stdout }) => stdout && stdout.trim().length > 0)
+        .catch(error => {
+            if (error.code === 1) {
+                return false;
             }
-            return resolve(false);
+            console.error('Unexpected error monitoring app:', error);
+            return false;
         });
-    });
 }
 
 function isTaskSchedulerOpen() {
-    return new Promise((resolve) => {
-        exec('tasklist /FI "IMAGENAME eq mmc.exe"', (err, stdout) => {
+    return execPromise('tasklist /FI "IMAGENAME eq mmc.exe"')
+        .then(({err, stdout}) => {
             if (err) {
                 console.error("❌ Failed to check Task Scheduler:", err);
-                return resolve(false);
+                return false;
             }
-            const isRunning = stdout && stdout.toLowerCase().includes("mmc.exe");
-            resolve(isRunning);
+            return stdout && stdout.toLowerCase().includes("mmc.exe");
+        })
+        .catch(error => {
+            console.log("Encountered error while determining if the task scheduler is open: ", error);
+            return false;
         });
-    });
 }
 
 function settingsProtectionOn() {
@@ -1416,15 +1482,149 @@ function isSafeSearchEnforced() {
 }
 
 function closeTaskManager() {
-    return new Promise((resolve) => {
-        exec('taskkill /IM Taskmgr.exe /F', (err) => {
+    return execPromise('taskkill /IM Taskmgr.exe /F')
+        .then(({err}) => {
             if (err) {
                 console.error('Failed to close Task Manager:', err);
-                resolve(false);
-            } else {
-                console.log('Task Manager closed successfully');
-                resolve(true);
+                return false;
             }
+            return true;
         });
+}
+
+const fileThreads = {
+    activeWorkers: new Map(),
+    workerQueue: [],
+    maxWorkers: 3,
+
+    execute(task, data) {
+        return new Promise((resolve, reject) => {
+            const taskId = Date.now() + Math.random();
+            this.workerQueue.push({ taskId, task, data, resolve, reject });
+            this.processQueue();
+        });
+    },
+
+    processQueue() {
+        if (this.workerQueue.length === 0 || this.activeWorkers.size >= this.maxWorkers) {
+            return;
+        }
+
+        const { taskId, task, data, resolve, reject } = this.workerQueue.shift();
+
+        const workerCode = `
+            const { parentPort, workerData } = require('worker_threads');
+            const fs = require('fs').promises;
+            const path = require('path');
+            
+            async function handleTask() {
+                try {
+                    const result = await (${task.toString()})(workerData);
+                    parentPort.postMessage({ success: true, result });
+                } catch (error) {
+                    parentPort.postMessage({ success: false, error: error.message });
+                }
+            }
+            
+            handleTask();
+        `;
+
+        const worker = new Worker(workerCode, {
+            eval: true,
+            workerData: data
+        });
+
+        this.activeWorkers.set(taskId, worker);
+
+        worker.on('message', (message) => {
+            if (message.success) {
+                resolve(message.result);
+            } else {
+                reject(new Error(message.error));
+            }
+            this.cleanupWorker(taskId);
+            this.processQueue();
+        });
+
+        worker.on('error', (error) => {
+            reject(error);
+            this.cleanupWorker(taskId);
+            this.processQueue();
+        });
+
+        worker.on('exit', (code) => {
+            if (code !== 0) {
+                reject(new Error(`Worker stopped with exit code ${code}`));
+            }
+            this.cleanupWorker(taskId);
+            this.processQueue();
+        });
+    },
+    cleanupWorker(taskId) {
+        const worker = this.activeWorkers.get(taskId);
+        if (worker) {
+            worker.terminate();
+            this.activeWorkers.delete(taskId);
+        }
+    }
+};
+
+async function readFileTask({ filename, basePath }) {
+    const dataPath = path.join(basePath, filename);
+    const defaultData = {
+        blockedApps: [],
+        blockedWebsites: [],
+        allowedForUnblockWebsites: [],
+        allowedForUnblockApps: [],
+    };
+    const fsp = require('fs').promises;
+
+    try {
+        await fsp.access(dataPath);
+        const raw = await fsp.readFile(dataPath, "utf8");
+        const jsonString = Buffer.isBuffer(raw) ? raw.toString("utf8") : raw;
+
+        try {
+            return JSON.parse(jsonString);
+        } catch (parseError) {
+            console.warn("⚠️ Corrupted JSON, attempting cleanup…");
+            const cleaned = jsonString
+                .trim()
+                .replace(/}+\s*$/, "}")
+                .replace(/,\s*}/g, "}");
+            return JSON.parse(cleaned);
+        }
+    } catch (error) {
+        return defaultData;
+    }
+}
+
+async function writeFileTask({ filename, data, basePath }) {
+    const dataPath = path.join(basePath, filename);
+    const fsp = require('fs').promises;
+
+    try {
+        await fsp.mkdir(path.dirname(dataPath), { recursive: true });
+        const tempPath = dataPath + '.tmp';
+        await fsp.writeFile(tempPath, JSON.stringify(data, null, 2), "utf-8");
+        await fsp.rename(tempPath, dataPath);
+        return { success: true, path: dataPath };
+    } catch (error) {
+        console.error("Write error:", error);
+        return { success: false, error: error.message };
+    }
+}
+
+function readData(filename = "savedPreferences.json") {
+    return fileThreads.execute(readFileTask, {
+        filename,
+        basePath
+    });
+}
+
+function writeData(data, filename) {
+    return fileThreads.execute(writeFileTask, {
+        filename,
+        basePath
     });
 }

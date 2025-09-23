@@ -1,5 +1,8 @@
 const {ipcRenderer} = require("electron");
 
+let preferencesCache = null;
+let cachePromise = null;
+
 const setChecked = (id, value) => {
     const element = document.getElementById(id);
     if (element) {
@@ -8,10 +11,72 @@ const setChecked = (id, value) => {
 }
 
 const showDelayChangeOrAccountabilityPartnerPrompt = (id) => ipcRenderer.send('show-delay-accountability-dialog', id);
-
 const showDNSSelectionPrompt = () => ipcRenderer.send('show-dns-dialog');
 
-async function updateUIState() {
+function getPreferences() {
+    if (cachePromise) {
+        return cachePromise;
+    }
+
+    cachePromise = ipcRenderer.invoke('getPreferences')
+        .then(prefs => {
+            preferencesCache = prefs || {};
+            return preferencesCache;
+        })
+        .catch(error => {
+            console.error('Failed to get preferences:', error);
+            preferencesCache = {};
+            return preferencesCache;
+        });
+
+    return cachePromise;
+}
+
+function invalidateCache() {
+    preferencesCache = null;
+    cachePromise = null;
+}
+
+function checkSavedPreferences(id) {
+    return getPreferences()
+        .then(preferences => !!(preferences && preferences[id]))
+        .catch(error => console.error("Encountered error when saving preferences:", error));
+}
+
+function isSafeSearchEnforced() {
+    return ipcRenderer.invoke('isSafeSearchEnforced');
+}
+
+const pendingPreferenceUpdates = {};
+let updateTimeout = null;
+
+function savePreference(id, value) {
+    pendingPreferenceUpdates[id] = value;
+
+    if (updateTimeout) {
+        clearTimeout(updateTimeout);
+    }
+
+    updateTimeout = setTimeout(() => {
+        const updates = {...pendingPreferenceUpdates};
+        Object.keys(pendingPreferenceUpdates).forEach(key => {
+            delete pendingPreferenceUpdates[key];
+        });
+
+        getPreferences()
+            .then(preferences => {
+                Object.assign(preferences, updates);
+                ipcRenderer.send('saveData', {
+                    data: preferences,
+                    fileName: 'savedPreferences.json'
+                });
+                invalidateCache();
+            })
+            .catch(error => console.error('Failed to save preferences:', error));
+    }, 500);
+}
+
+function updateUIState() {
     const switchIds = [
         'enableProtectiveDNS',
         'overlayRestrictedContent',
@@ -21,13 +86,16 @@ async function updateUIState() {
         'maliciousAppBlacklist'
     ];
 
-    for (const id of switchIds) {
-        const element = document.getElementById(id);
-        if (element) {
-            const value = await checkSavedPreferences(id);
-            element.checked = !!value;
-        }
-    }
+    return getPreferences()
+        .then(preferences => {
+            switchIds.forEach(id => {
+                const element = document.getElementById(id);
+                if (element) {
+                    element.checked = !!(preferences && preferences[id]);
+                }
+            });
+        })
+        .catch(error => console.error('Failed to update UI state:', error));
 }
 
 function initializeOverlaySettingSwitch() {
@@ -37,32 +105,19 @@ function initializeOverlaySettingSwitch() {
     if (!overlaySettingsSwitch || overlaySettingsSwitch._hasListener) return;
     overlaySettingsSwitch._hasListener = true;
 
-    overlaySettingsSwitch.addEventListener("change", async () => {
-        const savedValue = await checkSavedPreferences(id);
-
-        if (savedValue === true) {
-            overlaySettingsSwitch.checked = true;
-            showDelayChangeOrAccountabilityPartnerPrompt(id);
-        } else {
-            void savePreference(id, true);
-        }
+    overlaySettingsSwitch.addEventListener("change", () => {
+        checkSavedPreferences(id)
+            .then(savedValue => {
+                if (savedValue === true) {
+                    overlaySettingsSwitch.checked = true;
+                    showDelayChangeOrAccountabilityPartnerPrompt(id);
+                } else {
+                    savePreference(id, true);
+                }
+            })
+            .catch(error => console.error('Error in overlay switch:', error));
     });
 }
-
-function turnOnAppProtection(){
-    ipcRenderer.send('turnOnAppProtection');
-}
-
-function turnOnSettingsProtection(){
-    ipcRenderer.send('turnOnSettingsProtection');
-}
-
-function turnOnSettings(){
-    turnOnAppProtection();
-    turnOnSettingsProtection();
-}
-
-const checkDnsSafety = async () => await ipcRenderer.invoke('check-dns-safety');
 
 function initializeProtectiveDNS() {
     const id = "enableProtectiveDNS";
@@ -71,20 +126,24 @@ function initializeProtectiveDNS() {
     if (!protectiveDNS || protectiveDNS._hasListener) return;
     protectiveDNS._hasListener = true;
 
-    protectiveDNS.addEventListener("change", async () => {
-        const savedValue = await checkSavedPreferences(id);
-        const isDnsSafeAlready = await checkDnsSafety();
-
-        if (isDnsSafeAlready && !!!savedValue) {
-            protectiveDNS.checked = true;
-            void savePreference(id, true);
-        } else if (!!savedValue) {
-            protectiveDNS.checked = true;
-            showDelayChangeOrAccountabilityPartnerPrompt(id);
-        } else {
-            protectiveDNS.checked = false;
-            showDNSSelectionPrompt();
-        }
+    protectiveDNS.addEventListener("change", () => {
+        Promise.all([
+            checkSavedPreferences(id),
+            ipcRenderer.invoke('check-dns-safety')
+        ])
+            .then(([savedValue, isDnsSafeAlready]) => {
+                if (isDnsSafeAlready && !savedValue) {
+                    protectiveDNS.checked = true;
+                    savePreference(id, true);
+                } else if (savedValue) {
+                    protectiveDNS.checked = true;
+                    showDelayChangeOrAccountabilityPartnerPrompt(id);
+                } else {
+                    protectiveDNS.checked = false;
+                    showDNSSelectionPrompt();
+                }
+            })
+            .catch(error => console.error('Error in DNS switch:', error));
     });
 }
 
@@ -94,16 +153,21 @@ function settingsProtectionSwitch() {
     if (!settingsProtection || settingsProtection._hasListener) return;
     settingsProtection._hasListener = true;
 
-    settingsProtection.addEventListener("change", async () => {
-        const savedValue = await checkSavedPreferences(id);
-        if (!!savedValue) {
-            settingsProtection.checked = true;
-            showDelayChangeOrAccountabilityPartnerPrompt(id);
-        } else {
-            const currentValue = await checkSavedPreferences(id);
-            void savePreference(id, !currentValue);
-            void ipcRenderer.invoke('activateSettingsProtection');
-        }
+    settingsProtection.addEventListener("change", () => {
+        checkSavedPreferences(id)
+            .then(savedValue => {
+                if (savedValue) {
+                    settingsProtection.checked = true;
+                    showDelayChangeOrAccountabilityPartnerPrompt(id);
+                } else {
+                    return checkSavedPreferences(id)
+                        .then(currentValue => {
+                            savePreference(id, !currentValue);
+                            return ipcRenderer.invoke('activateSettingsProtection');
+                        });
+                }
+            })
+            .catch(error => console.error('Error in settings protection switch:', error));
     });
 }
 
@@ -114,23 +178,27 @@ function initializeSafeSearchSwitch() {
     if (!safeSearchSwitch || safeSearchSwitch._hasListener) return;
     safeSearchSwitch._hasListener = true;
 
-    safeSearchSwitch.addEventListener("change", async () => {
-        const savedValue = await checkSavedPreferences(id);
-        const isSafeSearchEnforcedValue = await isSafeSearchEnforced();
+    safeSearchSwitch.addEventListener("change", () => {
+        Promise.all([
+            checkSavedPreferences(id),
+            isSafeSearchEnforced()
+        ])
+            .then(([savedValue, isSafeSearchEnforcedValue]) => {
+                if (isSafeSearchEnforcedValue && !savedValue) {
+                    safeSearchSwitch.checked = true;
+                    savePreference(id, true);
+                    return;
+                }
 
-        if (isSafeSearchEnforcedValue && !savedValue) {
-            safeSearchSwitch.checked = true;
-            void savePreference(id, true);
-            return;
-        }
-
-        if (savedValue) {
-            safeSearchSwitch.checked = true;
-            showDelayChangeOrAccountabilityPartnerPrompt(id);
-        } else {
-            safeSearchSwitch.checked = false;
-            ipcRenderer.send('enforce-safe-search');
-        }
+                if (savedValue) {
+                    safeSearchSwitch.checked = true;
+                    showDelayChangeOrAccountabilityPartnerPrompt(id);
+                } else {
+                    safeSearchSwitch.checked = false;
+                    ipcRenderer.send('enforce-safe-search');
+                }
+            })
+            .catch(error => console.error('Error in safe search switch:', error));
     });
 }
 
@@ -168,6 +236,19 @@ function initializeTooltips() {
     });
 }
 
+function turnOnAppProtection() {
+    ipcRenderer.send('turnOnAppProtection');
+}
+
+function turnOnSettingsProtection() {
+    ipcRenderer.send('turnOnSettingsProtection');
+}
+
+function turnOnSettings() {
+    turnOnAppProtection();
+    turnOnSettingsProtection();
+}
+
 function initializeEventListeners() {
     initializeOverlaySettingSwitch();
     initializeProtectiveDNS();
@@ -177,31 +258,39 @@ function initializeEventListeners() {
 }
 
 function init() {
+    if(true){
+        return false;
+    }
     initializeEventListeners();
     updateUIState()
-        .then(() => turnOnSettings());
+        .then(() => turnOnSettings())
+        .catch(error => console.error('Initialization error:', error));
+    initNavBar();
 }
 
-ipcRenderer.on('turnOffSetting', (event, id) => setChecked(id, false));
 
-ipcRenderer.on('refreshMainConfig', () => updateUIState());
+function initNavBar(){
+    const homeButton = document.getElementById("home");
+    homeButton.addEventListener("click", (e) => {
+        ipcRenderer.send('openMainConfig');
+    });
 
-window.addEventListener('DOMContentLoaded', () => init());
-
-async function checkSavedPreferences(id){
-    const preferences = await ipcRenderer.invoke('getPreferences');
-    return preferences && !!preferences[id];
-}
-
-async function isSafeSearchEnforced(){
-    return await ipcRenderer.invoke('isSafeSearchEnforced');
-}
-
-async function savePreference(id, value){
-    const preferences = await ipcRenderer.invoke('getPreferences');
-    preferences[id] = value;
-    ipcRenderer.send('saveData', {
-        data: preferences,
-        fileName: 'savedPreferences.json'
+    const openBlockApps = document.getElementById("blockApps");
+    openBlockApps.addEventListener("click", (e) => {
+        ipcRenderer.send('openBlockApps');
     });
 }
+
+ipcRenderer.on('turnOffSetting', (event, id) => {
+    setChecked(id, false);
+    invalidateCache();
+});
+
+ipcRenderer.on('refreshMainConfig', () => {
+    invalidateCache();
+    updateUIState()
+        .then(() => turnOnSettings())
+        .catch(error => console.error('Initialization error:', error));
+});
+
+window.addEventListener('DOMContentLoaded', () => init());

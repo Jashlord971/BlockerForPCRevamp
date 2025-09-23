@@ -3,25 +3,13 @@
   "blockedWebsites": false,
   "allowedForUnblockWebsites": false,
   "allowedForUnblockApps": false,
-  "overlayRestrictedContent": false,
-  "enableProtectiveDNS": true,
-  "blockSettingsSwitch": false,
+  "overlayRestrictedContent": true,
+  "enableProtectiveDNS": false,
+  "blockSettingsSwitch": true,
   "appUninstallationProtection": true,
-  "enforceSafeSearch": true,
-  "delayTimeout": 180000,
+  "enforceSafeSearch": false,
+  "delayTimeout": 3600000,
   "timerInfo": {
-    "overlayRestrictedContent": {
-      "delayTimeout": 180000,
-      "remainingTime": 169906,
-      "startTimeStamp": 1758347697534,
-      "targetTimeout": null
-    },
-    "lastManualChangeTimestamp": 1757478912152,
-    "blockSettingsSwitch": {
-      "delayTimeout": 180000,
-      "remainingTime": 180000,
-      "startTimeStamp": 1758348699035,
-      "targetTimeout": null
-    }
+    "lastManualChangeTimestamp": 1757478912152
   }
-}}
+}

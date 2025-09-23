@@ -4,13 +4,40 @@
     <meta charset="UTF-8">
     <title>Main Configurations</title>
     <style>
-
         body {
             background-color: #0047AB;
             color: white;
             font-family: sans-serif;
             margin: 0;
             padding: 0;
+        }
+
+        /* Menu Bar Styles */
+        .menu-bar {
+            background-color: #003380;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+        }
+
+        .menu-item {
+            padding: 15px 20px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            font-weight: 500;
+        }
+
+        .menu-item:hover {
+            background-color: #00264d;
+        }
+
+        .menu-item.active {
+            background-color: #001a33;
+            border-bottom: 3px solid #4CAF50;
         }
 
         .container {
@@ -114,6 +141,14 @@
     </style>
 </head>
 <body>
+<!-- Menu Bar -->
+<div class="menu-bar">
+    <div class="menu-item active" id = "home">Home</div>
+    <div class="menu-item" id = "blockWebsites">Block Websites</div>
+    <div class="menu-item" id = "blockApps">Block Apps</div>
+    <div class="menu-item" id = "settings">Settings</div>
+</div>
+
 <div class="container">
     <h1>Main Configurations</h1>
 
@@ -162,12 +197,6 @@
         </label>
     </div>
 </div>
-
-
-<script>
-
-</script>
-
 
 <script src="mainConfig.js"></script>
 </body>
