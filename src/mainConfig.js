@@ -258,9 +258,6 @@ function initializeEventListeners() {
 }
 
 function init() {
-    if(true){
-        return false;
-    }
     initializeEventListeners();
     updateUIState()
         .then(() => turnOnSettings())
