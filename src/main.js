@@ -4,7 +4,6 @@ const {exec} = require("child_process");
 const util = require('util');
 const execPromise = util.promisify(exec);
 const {getInstalledApps}  = require("get-installed-apps");
-const fs = require('fs');
 const fsp = require("fs").promises;
 const sudoPrompt = require("sudo-prompt");
 const _ = require("lodash");
@@ -16,32 +15,20 @@ let lastFetchTime = 0;
 const CACHE_TTL = 5 * 60 * 1000;
 
 let mainWindow = null;
-let blockData = {};
-let preferences = {};
-
 let activeTimers = new Map();
 let overlayWindow = null;
 let dnsConfirmationModal = null;
 let delayAccountDialog = null;
 let flag = false;
 let overlayQueue = [];
+let windows = new Map();
 
 const gotTheLock = app.requestSingleInstanceLock();
 const basePath = !app.isPackaged ? path.join(__dirname, 'data') : path.join(app.getPath('userData'), 'data');
-
 const HOSTS_PATH = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
-
-function getAssetPath(fileName) {
-    return path.join(__dirname, fileName);
-}
 
 function getHtmlPath(fileName) {
     return path.join(__dirname, fileName);
-}
-
-function ensureDataDirectory() {
-    return fsp.access(basePath)
-        .catch(() => fsp.mkdir(basePath, { recursive: true }));
 }
 
 function checkSavedPreferences(id) {
@@ -89,64 +76,58 @@ function getMenuTemplate(){
             submenu: [
                 {
                     label: 'Block Websites',
-                    click: () => windowManager.openWindow('blockWebsites', 'blockTableForWebsites.html')
+                    click: () => openWindow('blockWebsites', 'blockTableForWebsites.html')
                 },
                 {
                     label: 'Block Apps',
-                    click: () => windowManager.openWindow('blockApps', 'blockTableForApps.html')
+                    click: () => openWindow('blockApps', 'blockTableForApps.html')
                 }
             ]
         },
         {
             label: 'Settings',
-            click: () => {
-                windowManager.openWindow('settings', 'delaySettingModal.html')
-            }
+            click: () => openWindow('settings', 'delaySettingModal.html')
         }
     ];
 }
 
-const windowManager = {
-    windows: new Map(),
+function openWindow(windowId, htmlFileName, options = {}) {
+    const existingWindow = windows.get(windowId);
+    if (existingWindow && !existingWindow.isDestroyed()) {
+        existingWindow.focus();
+        return existingWindow;
+    }
 
-    openWindow(windowId, htmlFileName, options = {}) {
-        const existingWindow = this.windows.get(windowId);
-        if (existingWindow && !existingWindow.isDestroyed()) {
-            existingWindow.focus();
-            return existingWindow;
+    const defaultOptions = {
+        width: 600,
+        height: 800,
+        modal: false,
+        webPreferences: {
+            nodeIntegration: true,
+            contextIsolation: false
         }
+    };
 
-        const defaultOptions = {
-            width: 600,
-            height: 800,
-            modal: false,
-            webPreferences: {
-                nodeIntegration: true,
-                contextIsolation: false
-            }
-        };
+    const newWindow = new BrowserWindow({ ...defaultOptions, ...options });
 
-        const newWindow = new BrowserWindow({ ...defaultOptions, ...options });
-
-        newWindow.loadFile(getHtmlPath(htmlFileName))
-            .then(() => console.log(`Successfully loaded the ${htmlFileName} window`))
-            .catch(error => {
-                console.log(`Encountered error while loading the ${htmlFileName} window`);
-                console.log(error);
-            });
-
-        newWindow.on('closed', () => {
-            this.windows.delete(windowId);
+    newWindow.loadFile(getHtmlPath(htmlFileName))
+        .then(() => console.log(`Successfully loaded the ${htmlFileName} window`))
+        .catch(error => {
+            console.log(`Encountered error while loading the ${htmlFileName} window`);
+            console.log(error);
         });
 
-        if (options.maximize !== false) {
-            newWindow.maximize();
-        }
+    newWindow.on('closed', () => {
+        this.windows.delete(windowId);
+    });
 
-        this.windows.set(windowId, newWindow);
-        return newWindow;
+    if (options.maximize !== false) {
+        newWindow.maximize();
     }
-};
+
+    windows.set(windowId, newWindow);
+    return newWindow;
+}
 
 function openMainConfig() {
     if (mainWindow) {
@@ -294,44 +275,14 @@ function autoLaunchApp(){
     });
 }
 
-function isTaskManagerOpen() {
-    return execPromise('tasklist /FI "IMAGENAME eq Taskmgr.exe"')
-        .then(({ stdout }) => stdout && stdout.toLowerCase().includes("taskmgr.exe"))
-        .catch(error => {
-            console.error('Error checking Task Manager:', error);
-            return false;
-        });
-}
-
-function getDataPath(filename){
-    return path.join(basePath, filename);
-}
-
 app.whenReady().then(async() => {
     if(!gotTheLock){
         app.quit();
         return false;
     }
 
-    fs.readFile(getDataPath('blockData.json'), 'utf8', (err, data) => {
-        if (err) {
-            console.error('Error:', err);
-            blockData = {};
-        } else {
-            blockData = JSON.parse(data);
-        }
-    });
-
-    fs.readFile(getDataPath('savedPreferences.json'), 'utf8', (err, data) => {
-        if (err) {
-            console.error('Error:', err);
-            preferences = {};
-        } else {
-            preferences = JSON.parse(data);
-        }
-    });
-
-    return ensureDataDirectory()
+    return fsp.access(basePath)
+        .catch(() => fsp.mkdir(basePath, { recursive: true }))
         .then(() => {
             openMainConfig()
                 .then(() => executeOpeningActions())
@@ -402,10 +353,8 @@ function createEagleTaskScheduleSimple() {
                 console.error("Error creating scheduled task:", stderr || error.message);
                 return false;
             }
-            else{
-                console.log("Eagle Task Schedule created successfully:", stdout);
-                return true;
-            }
+            console.log("Eagle Task Schedule created successfully:", stdout);
+            return true;
         });
 }
 
@@ -467,12 +416,15 @@ function flagAppWithOverlay(displayName, processName) {
             } else {
                 canFlagNow()
                     .then(result => {
-                        if(result){
+                        if(!result){
+                            return Promise.reject("Can not flag now");
+                        }
+                        return getRunningProcessNames();
+                    })
+                    .then(runningProcessNames => {
+                        if(runningProcessNames.has(processName)){
                             console.log(appInfo);
                             createOverlayAndPassInfo(appInfo);
-                        }
-                        else{
-                            setTimeout(() => createOverlayAndPassInfo(appInfo), 30000);
                         }
                     })
                     .catch(error => {
@@ -1090,179 +1042,154 @@ function isSafeDNS(interfaceName) {
         });
 }
 
-const processCache = {
-    data: new Map(),
-    lastUpdate: 0,
-    cacheTimeout: 3000
-};
-
-const getAllProcessInfo = () => {
-    const now = Date.now();
-
-    if (now - processCache.lastUpdate < processCache.cacheTimeout) {
-        return Promise.resolve(processCache.data);
-    }
-
-    const psCommand = `
-            $processes = Get-Process | Where-Object { 
-                $_.ProcessName -or $_.MainWindowTitle 
-            } | Select-Object ProcessName, MainWindowTitle, Id;
-            
-            $result = @{
-                processes = $processes;
-                controlPanel = ($processes | Where-Object { $_.MainWindowTitle -match 'Control Panel' }).Count -gt 0;
-                notepadHosts = ($processes | Where-Object { 
-                    $_.ProcessName -eq 'notepad' -and $_.MainWindowTitle -like '*hosts*' 
-                }).Count -gt 0
-            };
-            
-            $result | ConvertTo-Json -Depth 3
-        `;
-
-    const command = `powershell -Command "${psCommand.replace(/\s+/g, ' ')}"`
-
-    return execPromise(command)
-        .then(({err, stdout}) => {
-            if (err) {
-                console.error('Process query error:', err);
-                return processCache.data;
+async function getRunningProcessNames() {
+    return execPromise('tasklist /FO CSV /NH')
+        .then(({stdout}) => {
+            if(!stdout){
+                return new Set();
             }
-
-            const result = JSON.parse(stdout);
-            const processMap = new Map();
-
-            const processes = result['processes'];
-            if (processes) {
-                processes.forEach(proc => {
-                    const key = proc["ProcessName"]?.toLowerCase();
-                    if (key) {
-                        processMap.set(key, {
-                            processName: proc["ProcessName"],
-                            windowTitle: proc['MainWindowTitle'] || '',
-                            id: proc['Id']
-                        });
-                    }
-                });
-            }
-
-            processMap.set('_meta', {
-                controlPanelOpen: result['controlPanel'],
-                notepadHostsOpen: result['notepadHosts']
-            });
-
-            processCache.data = processMap;
-            processCache.lastUpdate = now;
-            return processMap;
+            return new Set(
+                Array.from(stdout.split("\n"))
+                    .filter(line => line && line.trim())
+                    .map(line => line.match(/^"([^"]+)"/))
+                    .filter(match => !!match)
+                    .map(match => match[1].toLowerCase())
+            );
         })
         .catch(error => {
-            console.error('Encountered the given error when getting all the process info:', error);
-            return processCache.data;
+            console.log("Encountered an error while getting all the running process names: ", error);
+            return new Set();
         });
-};
+}
+
+async function getProcessWindowTitle(processName) {
+    const baseName = processName.replace('.exe', '');
+    const command = `powershell -Command "Get-Process -Name '${baseName}' -ErrorAction SilentlyContinue | Select-Object MainWindowTitle | ConvertTo-Json -Compress"`;
+    return execPromise(command)
+        .then(({stdout}) => {
+            if(!stdout){
+                return '';
+            }
+            const result = JSON.parse(stdout);
+            return (result && Array.isArray(result) && !_.isEmpty(result)) ? (result[0]['MainWindowTitle'] || '') : _.get(result, 'MainWindowTitle', '');
+        });
+}
 
 function appBlockProtection() {
-    let monitoringInterval = null;
+    let isChecking = false;
     const activeOverlays = new Set();
 
     const getBlockedAppsList = () => {
         return readData('blockData.json')
             .then(blockData => Array.from(_.get(blockData, 'blockedApps', undefined) || []))
             .catch(error => {
-                console.log("Encountered error while getting blocked apps from DB: ", error);
+                console.log("Error getting blocked apps:", error);
                 return [];
             });
     };
 
-    const checkBlockedApps = () => {
-        return getAllProcessInfo()
-            .then(processMap => {
-                getBlockedAppsList()
-                    .then(blockedApps => {
-                        Array.from(blockedApps).forEach(app => {
-                            const processNameBase = app.processName.replace('.exe', '').toLowerCase();
-                            const displayName = app.displayName;
-                            const processInfo = processMap.get(processNameBase);
-
-                            let isRunning = false;
-
-                            if (processInfo) {
-                                isRunning = true;
-                            } else {
-                                for (const [key, proc] of processMap) {
-                                    if (key !== '_meta' && proc.windowTitle &&
-                                        proc.windowTitle.toLowerCase().includes(displayName.toLowerCase())) {
-                                        isRunning = true;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if (isRunning) {
-                                if (!activeOverlays.has(app.processName)) {
-                                    console.log(`⚠️ Blocked app ${displayName} is running.`);
-                                    flagAppWithOverlay(displayName, app.processName);
-                                    activeOverlays.add(app.processName);
-                                }
-                            } else {
-                                activeOverlays.delete(app.processName);
-                            }
-                        });
-                    })
-                    .catch(error => {
-                        console.log("Error encountered while getting list of blocked apps");
-                        console.log(error);
-                    });
+    const flagIfExisting = (runningProcesses, blockedApps) => {
+        Array.from(blockedApps)
+            .filter(app => app && app.processName)
+            .map(app => ({
+                processName: app.processName,
+                displayName: app.displayName
+            }))
+            .forEach(({processName, displayName}) => {
+                if(runningProcesses.has(processName)){
+                    if (!activeOverlays.has(processName)) {
+                        console.log(`Blocked app ${displayName} is running`);
+                        void flagAppWithOverlay(displayName, processName);
+                        activeOverlays.add(processName);
+                    }
+                }
+                else{
+                    activeOverlays.delete(processName);
+                }
             });
-    };
+    }
 
-    const monitorBlockedApps = () => {
-        if (monitoringInterval) return;
+    const checkBlockedApps = async () => {
+        if (isChecking) {
+            return;
+        }
+        isChecking = true;
 
-        monitoringInterval = setInterval( () => {
-            checkSavedPreferences("overlayRestrictedContent")
-                .then(isAppBlockingEnabled => {
-                    if(isAppBlockingEnabled){
-                        void checkBlockedApps();
-                    }
-                    else{
-                        clearInterval(monitoringInterval);
-                        monitoringInterval = null;
-                        activeOverlays.clear();
-                    }
-                })
-                .catch(() => console.log("Error encountered while checking saved preferences"));
-        }, 8000);
-    };
-
-    const mainCall = () => {
-        checkSavedPreferences("overlayRestrictedContent")
-            .then(isAppBlockingEnabled => {
-                if(!isAppBlockingEnabled){
+        return checkSavedPreferences("overlayRestrictedContent")
+            .then(isEnabled => {
+                if (!isEnabled) {
+                    isChecking = false;
                     return;
                 }
-
-                checkBlockedApps()
-                    .then(() => monitorBlockedApps())
-                    .then(() => {
-                        isTaskManagerOpen()
-                            .then(running => {
-                                if (running) {
-                                    console.log("⚠️ Task Manager is OPEN!");
-                                    void flagAppWithOverlay("Task Manager", 'Taskmgr.exe');
-                                } else {
-                                    console.log("✅ Task Manager is CLOSED.");
-                                }
-                            })
-                            .catch(error => console.log("Encountered issue when checking if the task manager is running:", error));
+                return getBlockedAppsList()
+                    .then(blockedApps => {
+                        if(_.isEmpty(blockedApps)){
+                            return;
+                        }
+                        return getRunningProcessNames()
+                            .then(runningProcesses => flagIfExisting(runningProcesses, blockedApps))
+                            .catch(error => console.log("Encountered error while getting the running process names: ", error));
                     })
-                    .catch(error => {
-                        console.log("Encountered error while checking and blocking disallowed apps");
-                        console.log(error);
-                    });
+                    .catch(error => console.log("Encountered error while getting the blocked apps list: ", error))
+            })
+            .catch(error => console.log("Encountered error while checking the saved preferences: ", error))
+            .finally(() => isChecking = false);
+    };
+
+    const interval = setInterval(checkBlockedApps, 8000);
+    void checkBlockedApps();
+
+    return interval;
+}
+
+function settingsProtectionOn() {
+    let isMonitoring = false;
+
+    const systemAppsMap = {
+        "control.exe" : "Control Panel",
+        'systemsettings.exe' : 'System settings',
+        'mmc.exe': "Task Scheduler",
+        'taskmgr.exe' : "Task Manager"
+    };
+
+    const flagIfExisting = (runningProcesses) => {
+        const processName = Object.keys(systemAppsMap).find(process => runningProcesses.has(process));
+        if(processName){
+            void flagAppWithOverlay(systemAppsMap[processName], processName);
+        }
+        else if (runningProcesses.has('notepad') && false){
+            return getProcessWindowTitle('notepad')
+                .then(windowTitle => {
+                    if(windowTitle && windowTitle.toLowerCase().includes('hosts')){
+                        void flagAppWithOverlay("Notepad (hosts file)", "notepad.exe");
+                    }
+                });
+        }
+    }
+
+    const checkSettings = async () => {
+        if (isMonitoring){
+            return;
+        }
+        isMonitoring = true;
+
+        return checkSavedPreferences('blockSettingsSwitch')
+            .then(isEnabled => {
+                if(!isEnabled){
+                    isMonitoring = false;
+                    return;
+                }
+                return getRunningProcessNames()
+                    .then(runningProcesses => flagIfExisting(runningProcesses))
+                    .catch(error => console.log("Encountered an error while getting the running process names: ", error))
+                    .finally(() => isMonitoring = false);
             });
     };
 
-    void mainCall();
+    const interval = setInterval(checkSettings, 12000);
+    void checkSettings();
+
+    return interval;
 }
 
 function closeApp(processName) {
@@ -1342,85 +1269,6 @@ function monitorProcessClosure(baseName) {
                 });
         }, 5000);
     });
-}
-
-
-function monitorApp(command) {
-    return execPromise(command)
-        .then(({ stdout }) => stdout && stdout.trim().length > 0)
-        .catch(error => {
-            if (error.code === 1) {
-                return false;
-            }
-            console.error('Unexpected error monitoring app:', error);
-            return false;
-        });
-}
-
-function isTaskSchedulerOpen() {
-    return execPromise('tasklist /FI "IMAGENAME eq mmc.exe"')
-        .then(({err, stdout}) => {
-            if (err) {
-                console.error("❌ Failed to check Task Scheduler:", err);
-                return false;
-            }
-            return stdout && stdout.toLowerCase().includes("mmc.exe");
-        })
-        .catch(error => {
-            console.log("Encountered error while determining if the task scheduler is open: ", error);
-            return false;
-        });
-}
-
-function settingsProtectionOn() {
-    const monitorSettings = () => {
-        const hostMonitoringCommand = `powershell -Command "Get-Process notepad -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -match 'hosts' }"`;
-        const controlPanelMonitorCommand =  `powershell -Command "Get-Process | Where-Object { $_.MainWindowTitle -match 'Control Panel' }"`;
-        return monitorApp(hostMonitoringCommand)
-            .then(isHostsFileFlagged => {
-                if(isHostsFileFlagged){
-                    void flagAppWithOverlay("Notepad (hosts file)", "notepad.exe");
-                    return Promise.reject("break");
-                }
-                return monitorApp(controlPanelMonitorCommand);
-            })
-            .then(isControlPanelOpen => {
-                if(isControlPanelOpen){
-                    void flagAppWithOverlay("Control Panel", "control.exe");
-                    return Promise.reject("break");
-                }
-                return isTaskSchedulerOpen();
-            })
-            .then(isTaskSchedulerOpen => {
-                if(isTaskSchedulerOpen){
-                    void flagAppWithOverlay("Task Scheduler", "mmc.exe");
-                    return Promise.reject("break");
-                }
-            })
-            .catch(error => {
-                if(error === "break"){
-                    return;
-                }
-                console.error("Error monitoring settings:", error);
-            });
-    }
-
-    checkSavedPreferences("blockSettingsSwitch")
-        .then(isSettingsBlockOn => {
-            if(!isSettingsBlockOn){
-                return;
-            }
-            const settingsInterval = setInterval(monitorSettings, 12000);
-
-            void monitorSettings();
-            appBlockProtection();
-
-            return settingsInterval;
-        })
-        .catch(error => {
-            console.log("Encountered error while enforcing settings protection");
-            console.log(error);
-        });
 }
 
 async function enforceSafeSearch() {
